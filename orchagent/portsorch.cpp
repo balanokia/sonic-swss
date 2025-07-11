@@ -2158,43 +2158,52 @@ bool PortsOrch::setPortFec(Port &port, sai_port_fec_mode_t fec_mode, bool overri
 
     if (m_gearboxEnabled && (m_portList[port.m_alias].m_init == true) && (m_gearboxInterfaceMap.find(port.m_index) != m_gearboxInterfaceMap.end()))
     {
-	map<sai_port_serdes_attr_t, vector<uint32_t>> serdes_attr;
-        generateSerdesAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
-	if (serdes_attr.size() != 0)
-	{
-	    status = setPortSerdesAttribute(port.m_system_side_id, port.m_switch_id, serdes_attr);
-	    if (status)
-	    {
-	        SWSS_LOG_NOTICE("Set port %s system side preemphasis is success", port.m_alias.c_str());
-	    }
-	    else
-	    {
-	        SWSS_LOG_ERROR("Failed to set port %s system side pre-emphasis", port.m_alias.c_str());
-	        return false;
-	    }
-	}
-	serdes_attr.clear();
-        generateSerdesAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
-	if (serdes_attr.size() != 0)
-	{
-	    status = setPortSerdesAttribute(port.m_line_side_id, port.m_switch_id, serdes_attr);
-	    if (status)
-	    {
-	        SWSS_LOG_NOTICE("Set port %s line side preemphasis is success", port.m_alias.c_str());
-	    }
-	    else
-	    {
-	        SWSS_LOG_ERROR("Failed to set port %s line side pre-emphasis", port.m_alias.c_str());
-	        return false;
-	    }
-	}
-	auto lt_status = setPortLinkTraining(port, true);
-	if (lt_status != task_success)
-	{
-	    status = false;
-	    SWSS_LOG_ERROR("Failed to set LinkTraining after FEC configuration for port %s", port.m_alias.c_str());
-	    return status;
-	}
+         map<sai_port_serdes_attr_t, vector<uint32_t>> serdes_attr;
+         generateSerdesAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+         if (serdes_attr.size() != 0)
+         {
+             status = setPortSerdesAttribute(port.m_system_side_id, port.m_switch_id, serdes_attr);
+             if (status)
+             {
+                 SWSS_LOG_NOTICE("Set port %s system side preemphasis is success", port.m_alias.c_str());
+             }
+             else
+             {
+                 SWSS_LOG_ERROR("Failed to set port %s system side pre-emphasis", port.m_alias.c_str());
+                 return false;
+             }
+         }
+         serdes_attr.clear();
+         generateSerdesAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+         if (serdes_attr.size() != 0)
+         {
+             status = setPortSerdesAttribute(port.m_line_side_id, port.m_switch_id, serdes_attr);
+             if (status)
+             {
+                 SWSS_LOG_NOTICE("Set port %s line side preemphasis is success", port.m_alias.c_str());
+             }
+             else
+             {
+                 SWSS_LOG_ERROR("Failed to set port %s line side pre-emphasis", port.m_alias.c_str());
+                 return false;
+             }
+         }
+
+         // Trigger PHY sys/line link training
+
+         status = setGearboxPortAttr(port, PHY_PORT_TYPE, SAI_PORT_ATTR_LINK_TRAINING_ENABLE, static_cast<void*>(&m_gearboxPortMap[port.m_index].system_training), override_fec);
+         if (status == false)
+         {
+             SWSS_LOG_ERROR("Failed to set PHY.System linkTraining after FEC configuration for port %s", port.m_alias.c_str());
+             return status;
+         }
+         status = setGearboxPortAttr(port, LINE_PORT_TYPE, SAI_PORT_ATTR_LINK_TRAINING_ENABLE, static_cast<void*>(&m_gearboxPortMap[port.m_index].line_training), override_fec);
+         if (status == false)
+         {
+             SWSS_LOG_ERROR("Failed to set PHY.Line linkTraining after FEC configuration for port %s", port.m_alias.c_str());
+             return status;
+         }
+         SWSS_LOG_NOTICE("Set Link Training to PHY System/Line Gearbox ports for port %s", port.m_alias.c_str());
     }
 
     return true;
@@ -3214,21 +3223,20 @@ bool PortsOrch::setGearboxPortAttr(const Port &port, dest_port_type_t port_type,
                     }
                     SWSS_LOG_NOTICE("BOX: Set %s MTU %d", port.m_alias.c_str(), attr.value.u32);
                     break;
-		case SAI_PORT_ATTR_LINK_TRAINING_ENABLE:
+                case SAI_PORT_ATTR_LINK_TRAINING_ENABLE:
+                    attr.id = id;
+                    attr.value.booldata = *static_cast<bool*>(value);
                     switch (port_type)
                     {
                         case PHY_PORT_TYPE:
-                            attr.value.booldata = m_gearboxPortMap[port.m_index].system_training;
-                            SWSS_LOG_NOTICE("BOX: Set System training mode %d", m_gearboxPortMap[port.m_index].system_training);
+                            SWSS_LOG_NOTICE("BOX: Set %s System side training mode %d", port.m_alias.c_str(), attr.value.booldata);
                             break;
                         case LINE_PORT_TYPE:
-                            attr.value.booldata = m_gearboxPortMap[port.m_index].line_training;
-                            SWSS_LOG_NOTICE("BOX: Set Line training mode %d", m_gearboxPortMap[port.m_index].line_training);
+                            SWSS_LOG_NOTICE("BOX: Set %s Line side training mode %d", port.m_alias.c_str(), attr.value.booldata);
                             break;
                         default:
                             return false;
                     }
-                    attr.id = id;
                     break;
                 default:
                     return false;
@@ -3526,13 +3534,6 @@ task_process_status PortsOrch::setPortLinkTraining(const Port &port, bool state)
     }
 
     SWSS_LOG_INFO("Set LT %s to port %s", op.c_str(), port.m_alias.c_str());
-
-    if (!setGearboxPortsAttr(port, SAI_PORT_ATTR_LINK_TRAINING_ENABLE, &state))
-    {
-        SWSS_LOG_WARN("Unable to set System/Line-side Link Training for port %s", port.m_alias.c_str());
-        return task_failed;
-    }
-    SWSS_LOG_INFO("Set Link Training to System/Line Gearbox ports for port %s", port.m_alias.c_str());
 
     return task_success;
 }
