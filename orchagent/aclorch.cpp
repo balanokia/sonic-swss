@@ -1035,11 +1035,61 @@ bool AclRule::validateAddMatch(string attr_name, string attr_value)
                 matchData.mask.u8 = 0x3F;
             }
         }
+        #if 0 // BALA
         else if (attr_name == MATCH_ETHER_TYPE || attr_name == MATCH_L4_SRC_PORT || attr_name == MATCH_L4_DST_PORT)
         {
             matchData.data.u16 = to_uint<uint16_t>(attr_value);
             matchData.mask.u16 = 0xFFFF;
         }
+        #else
+        else if (attr_name == MATCH_ETHER_TYPE)
+        {
+            matchData.data.u16 = to_uint<uint16_t>(attr_value);
+            matchData.mask.u16 = 0xFFFF;
+        }
+        else if (attr_name == MATCH_L4_DST_PORT)
+        {
+            size_t sep = attr_value.find('/');
+            if (sep != std::string::npos)
+            {
+                // "DATA/MASK"
+                std::string data_str = attr_value.substr(0, sep);
+                std::string mask_str = attr_value.substr(sep + 1);
+                int d = stoi(data_str);  // DATA
+                int m = stoi(mask_str);  // MASK
+                matchData.data.u16 = static_cast<sai_uint16_t>(d);
+                matchData.mask.u16 = static_cast<sai_uint16_t>(m);
+            }
+            else
+            {
+                // "no mask provided
+                int d = stoi(attr_value);
+                matchData.data.u16 = static_cast<sai_uint16_t>(d);
+                matchData.mask.u16 = 0xFFFF; // exact match
+            }
+        }
+        else if (attr_name == MATCH_L4_SRC_PORT)
+        {
+            size_t sep = attr_value.find('/');
+            if (sep != std::string::npos)
+            {
+                // "DATA/MASK"
+                std::string data_str = attr_value.substr(0, sep);
+                std::string mask_str = attr_value.substr(sep + 1);
+                int d = stoi(data_str);  // DATA
+                int m = stoi(mask_str);  // MASK
+                matchData.data.u16 = static_cast<sai_uint16_t>(d);
+                matchData.mask.u16 = static_cast<sai_uint16_t>(m);
+            }
+            else
+            {
+                // "no mask provided
+                int d = stoi(attr_value);
+                matchData.data.u16 = static_cast<sai_uint16_t>(d);
+                matchData.mask.u16 = 0xFFFF; // exact match
+            }
+        }
+        #endif
         else if (attr_name == MATCH_VLAN_ID)
         {
             matchData.data.u16 = to_uint<uint16_t>(attr_value);
@@ -1103,7 +1153,6 @@ bool AclRule::validateAddMatch(string attr_name, string attr_value)
                 SWSS_LOG_ERROR("Range parse error. Attribute: %s, value: %s", attr_name.c_str(), attr_value.c_str());
                 return false;
             }
-
             rangeConfig.rangeType = aclRangeTypeLookup[attr_name];
 
             // check boundaries
