@@ -1035,13 +1035,6 @@ bool AclRule::validateAddMatch(string attr_name, string attr_value)
                 matchData.mask.u8 = 0x3F;
             }
         }
-        #if 0 // BALA
-        else if (attr_name == MATCH_ETHER_TYPE || attr_name == MATCH_L4_SRC_PORT || attr_name == MATCH_L4_DST_PORT)
-        {
-            matchData.data.u16 = to_uint<uint16_t>(attr_value);
-            matchData.mask.u16 = 0xFFFF;
-        }
-        #else
         else if (attr_name == MATCH_ETHER_TYPE)
         {
             matchData.data.u16 = to_uint<uint16_t>(attr_value);
@@ -1049,47 +1042,36 @@ bool AclRule::validateAddMatch(string attr_name, string attr_value)
         }
         else if (attr_name == MATCH_L4_DST_PORT)
         {
-            size_t sep = attr_value.find('/');
-            if (sep != std::string::npos)
+            // Support both exact value match and value/mask match
+            auto flag_data = tokenize(attr_value, '/');
+
+            matchData.data.u16 = to_uint<uint16_t>(flag_data[0], 0, 0xFFFF);
+
+            if (flag_data.size() == 2)
             {
-                // "DATA/MASK"
-                std::string data_str = attr_value.substr(0, sep);
-                std::string mask_str = attr_value.substr(sep + 1);
-                int d = stoi(data_str);  // DATA
-                int m = stoi(mask_str);  // MASK
-                matchData.data.u16 = static_cast<sai_uint16_t>(d);
-                matchData.mask.u16 = static_cast<sai_uint16_t>(m);
+                matchData.mask.u16 = to_uint<uint16_t>(flag_data[1], 0, 0xFFFF);
             }
             else
             {
-                // "no mask provided
-                int d = stoi(attr_value);
-                matchData.data.u16 = static_cast<sai_uint16_t>(d);
-                matchData.mask.u16 = 0xFFFF; // exact match
+                matchData.mask.u16 = 0xFFFF;
             }
         }
         else if (attr_name == MATCH_L4_SRC_PORT)
         {
-            size_t sep = attr_value.find('/');
-            if (sep != std::string::npos)
+            // Support both exact value match and value/mask match
+            auto flag_data = tokenize(attr_value, '/');
+
+            matchData.data.u16 = to_uint<uint16_t>(flag_data[0], 0, 0xFFFF);
+
+            if (flag_data.size() == 2)
             {
-                // "DATA/MASK"
-                std::string data_str = attr_value.substr(0, sep);
-                std::string mask_str = attr_value.substr(sep + 1);
-                int d = stoi(data_str);  // DATA
-                int m = stoi(mask_str);  // MASK
-                matchData.data.u16 = static_cast<sai_uint16_t>(d);
-                matchData.mask.u16 = static_cast<sai_uint16_t>(m);
+                matchData.mask.u16 = to_uint<uint16_t>(flag_data[1], 0, 0xFFFF);
             }
             else
             {
-                // "no mask provided
-                int d = stoi(attr_value);
-                matchData.data.u16 = static_cast<sai_uint16_t>(d);
-                matchData.mask.u16 = 0xFFFF; // exact match
+                matchData.mask.u16 = 0xFFFF;
             }
         }
-        #endif
         else if (attr_name == MATCH_VLAN_ID)
         {
             matchData.data.u16 = to_uint<uint16_t>(attr_value);
