@@ -2115,7 +2115,7 @@ bool PortsOrch::setPortAdminStatus(Port &port, bool state)
            if (!setPortFec(port, port.m_fec_mode, port.m_override_fec))
            {
                SWSS_LOG_ERROR("Failed to set port %s FEC mode %d", port.m_alias.c_str(), static_cast<std::int32_t>(port.m_fec_mode));
-	       return false;
+               return false;
            }
         }
     }
@@ -2298,17 +2298,7 @@ bool PortsOrch::setPortFecOverride(sai_object_id_t port_obj, bool override_fec)
 bool PortsOrch::setPortFec(Port &port, sai_port_fec_mode_t fec_mode, bool override_fec)
 {
     SWSS_LOG_ENTER();
-    auto gearbox_interface = m_gearboxInterfaceMap.find(port.m_index);
-    if (m_gearboxEnabled && (m_portList[port.m_alias].m_init == true) && (m_gearboxInterfaceMap.find(port.m_index) != m_gearboxInterfaceMap.end()))
-    {
-        if (port.m_admin_state_up)
-        {
-           if (!setPortAdminStatus(const_cast<Port &>(port), false))
-           {
-               return false;
-           }
-        }
-    }
+
     sai_attribute_t attr;
     attr.id = SAI_PORT_ATTR_FEC_MODE;
     attr.value.s32 = fec_mode;
@@ -2331,51 +2321,61 @@ bool PortsOrch::setPortFec(Port &port, sai_port_fec_mode_t fec_mode, bool overri
     setGearboxPortsAttr(port, SAI_PORT_ATTR_FEC_MODE, &fec_mode, override_fec);
 
     SWSS_LOG_NOTICE("Set port %s FEC mode %d", port.m_alias.c_str(), fec_mode);
+
+    // BALA
+    SWSS_LOG_NOTICE("BALA BOX: port_id:0x%" PRIx64 " index:%d alias:%s", port.m_port_id, port.m_index, port.m_alias.c_str());
+    auto gearbox_interface = m_gearboxInterfaceMap.find(port.m_index);
+
+    SWSS_LOG_NOTICE("BALA GB Port Flag: m_gearboxEnabled :0x%d m_portList[port.m_alias].m_init :  %d  m_gearboxInterfaceMap.find(port.m_index) %d port.m_admin_state_up %d",m_gearboxEnabled, m_portList[port.m_alias].m_init,  gearbox_interface->second.index, port.m_admin_state_up);
+
     if (m_gearboxEnabled && (m_portList[port.m_alias].m_init == true) && (m_gearboxInterfaceMap.find(port.m_index) != m_gearboxInterfaceMap.end()))
     {
-	map<sai_port_serdes_attr_t, vector<uint32_t>> serdes_attr;
-        generateSerdesAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
-	if (serdes_attr.size() != 0)
-	{
-	    status = setPortSerdesAttribute(port.m_system_side_id, port.m_switch_id, serdes_attr);
-	    if (status)
-	    {
-	        SWSS_LOG_NOTICE("Set port %s system side preemphasis is success", port.m_alias.c_str());
-	    }
-	    else
-	    {
-	        SWSS_LOG_ERROR("Failed to set port %s system side pre-emphasis", port.m_alias.c_str());
-	        return false;
-	    }
-	}
-	serdes_attr.clear();
-        generateSerdesAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
-	if (serdes_attr.size() != 0)
-	{
-	    status = setPortSerdesAttribute(port.m_line_side_id, port.m_switch_id, serdes_attr);
-	    if (status)
-	    {
-	        SWSS_LOG_NOTICE("Set port %s line side preemphasis is success", port.m_alias.c_str());
-	    }
-	    else
-	    {
-	        SWSS_LOG_ERROR("Failed to set port %s line side pre-emphasis", port.m_alias.c_str());
-	        return false;
-	    }
-	}
-	auto lt_status = setPortLinkTraining(port, true);
-	if (lt_status != task_success)
-	{
-	    status = false;
-	    return status;
-	}
-        if (port.m_admin_state_up)
-	{
-	    if (!setPortAdminStatus(const_cast<Port &>(port), true))
-	    {
-	        return false;
-	    }
-	}
+         map<sai_port_serdes_attr_t, vector<uint32_t>> serdes_attr;
+         generateSerdesAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+         if (serdes_attr.size() != 0)
+         {
+             status = setPortSerdesAttribute(port.m_system_side_id, port.m_switch_id, serdes_attr);
+             if (status)
+             {
+                 SWSS_LOG_NOTICE("Set port %s system side preemphasis is success", port.m_alias.c_str());
+             }
+             else
+             {
+                 SWSS_LOG_ERROR("Failed to set port %s system side pre-emphasis", port.m_alias.c_str());
+                 return false;
+             }
+         }
+         serdes_attr.clear();
+         generateSerdesAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+         if (serdes_attr.size() != 0)
+         {
+             status = setPortSerdesAttribute(port.m_line_side_id, port.m_switch_id, serdes_attr);
+             if (status)
+             {
+                 SWSS_LOG_NOTICE("Set port %s line side preemphasis is success", port.m_alias.c_str());
+             }
+             else
+             {
+                 SWSS_LOG_ERROR("Failed to set port %s line side pre-emphasis", port.m_alias.c_str());
+                 return false;
+             }
+         }
+
+         // Trigger PHY sys/line link training
+
+         status = setGearboxPortAttr(port, PHY_PORT_TYPE, SAI_PORT_ATTR_LINK_TRAINING_ENABLE, static_cast<void*>(&m_gearboxPortMap[port.m_index].system_training), override_fec);
+         if (status == false)
+         {
+             SWSS_LOG_ERROR("Failed to set PHY.System linkTraining after FEC configuration for port %s", port.m_alias.c_str());
+             return status;
+         }
+         status = setGearboxPortAttr(port, LINE_PORT_TYPE, SAI_PORT_ATTR_LINK_TRAINING_ENABLE, static_cast<void*>(&m_gearboxPortMap[port.m_index].line_training), override_fec);
+         if (status == false)
+         {
+             SWSS_LOG_ERROR("Failed to set PHY.Line linkTraining after FEC configuration for port %s", port.m_alias.c_str());
+             return status;
+         }
+         SWSS_LOG_NOTICE("Set Link Training to PHY System/Line Gearbox ports for port %s", port.m_alias.c_str());
     }
 
     return true;
