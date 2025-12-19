@@ -9622,6 +9622,7 @@ bool PortsOrch::setPortSerdesAttribute(sai_object_id_t port_id, sai_object_id_t 
 
 bool PortsOrch::generateSerdesAttrMap(const map<string, sai_port_serdes_attr_t> &firStringToAttrMap, const map<string, string> &firValueMap, map<sai_port_serdes_attr_t, SerdesValue> &serdesAttrOut)
 {
+    typedef pair<sai_port_serdes_attr_t, SerdesValue> serdes_attr_pair;
     std::vector<uint32_t> attr_val;
 
     for (const auto &pair : firStringToAttrMap)
@@ -9631,8 +9632,7 @@ bool PortsOrch::generateSerdesAttrMap(const map<string, sai_port_serdes_attr_t> 
         {
             attr_val.clear();
             getPortSerdesVal(it->second, attr_val, 10);
-            auto &vec = serdesAttrOut[pair.second];
-            vec.insert(vec.end(), attr_val.begin(), attr_val.end());
+            serdesAttrOut.insert(serdes_attr_pair(pair.second, attr_val));
         }
     }
     return true;
