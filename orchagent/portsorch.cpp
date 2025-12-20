@@ -2329,7 +2329,7 @@ bool PortsOrch::setPortFec(Port &port, sai_port_fec_mode_t fec_mode, bool overri
     if (m_gearboxEnabled && (m_portList[port.m_alias].m_init == true) && (m_gearboxInterfaceMap.find(port.m_index) != m_gearboxInterfaceMap.end()))
     {
         map<sai_port_serdes_attr_t, SerdesValue> serdes_attr;
-        generateSerdesAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+        generateSerdesTxFirAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
         if (serdes_attr.size() != 0)
         {
              status = setPortSerdesAttribute(port.m_system_side_id, port.m_switch_id, serdes_attr);
@@ -2344,7 +2344,7 @@ bool PortsOrch::setPortFec(Port &port, sai_port_fec_mode_t fec_mode, bool overri
              }
          }
          serdes_attr.clear();
-         generateSerdesAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+         generateSerdesTxFirAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
          if (serdes_attr.size() != 0)
          {
              status = setPortSerdesAttribute(port.m_line_side_id, port.m_switch_id, serdes_attr);
@@ -9666,7 +9666,7 @@ bool PortsOrch::setPortMediaType(Port& port, const string &media_type)
     return true;
 }
 
-bool PortsOrch::generateSerdesAttrMap(const map<string, sai_port_serdes_attr_t> &firStringToAttrMap, const map<string, string> &firValueMap, map<sai_port_serdes_attr_t, SerdesValue> &serdesAttrOut)
+bool PortsOrch::generateSerdesTxFirAttrMap(const map<string, sai_port_serdes_attr_t> &firStringToAttrMap, const map<string, string> &firValueMap, map<sai_port_serdes_attr_t, SerdesValue> &serdesAttrOut)
 {
     typedef pair<sai_port_serdes_attr_t, SerdesValue> serdes_attr_pair;
     std::vector<uint32_t> attr_val;
@@ -10068,7 +10068,7 @@ bool PortsOrch::initGearboxPort(Port &port)
 
             /* Set serdes tx taps on system and line side */
             map<sai_port_serdes_attr_t, SerdesValue> serdes_attr;
-            generateSerdesAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+            generateSerdesTxFirAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
             if (serdes_attr.size() != 0)
             {
                 if (setPortSerdesAttribute(systemPort, phyOid, serdes_attr))
@@ -10082,7 +10082,7 @@ bool PortsOrch::initGearboxPort(Port &port)
                 }
             }
             serdes_attr.clear();
-            generateSerdesAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
+            generateSerdesTxFirAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
             if (serdes_attr.size() != 0)
             {
                 if (setPortSerdesAttribute(linePort, phyOid, serdes_attr))
