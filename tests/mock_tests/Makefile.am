@@ -30,6 +30,7 @@ tests_INCLUDES = -I $(FLEX_CTR_DIR) -I $(DEBUG_CTR_DIR) -I $(top_srcdir)/lib -I$
 
 tests_SOURCES = aclorch_ut.cpp \
                 aclorch_rule_ut.cpp \
+                gearbox_ut.cpp \
                 portsorch_ut.cpp \
                 vxlanorch_ut.cpp \
                 routeorch_ut.cpp \
@@ -208,6 +209,7 @@ tests_SOURCES += $(P4_ORCH_DIR)/p4orch.cpp \
 
 tests_CFLAGS = $(DBGFLAGS) $(AM_CFLAGS) $(CFLAGS_COMMON) $(CFLAGS_GTEST) $(CFLAGS_SAI)
 tests_CPPFLAGS = $(DBGFLAGS) $(AM_CFLAGS) $(CFLAGS_COMMON) $(CFLAGS_GTEST) $(CFLAGS_SAI) $(tests_INCLUDES)
+tests_LDFLAGS = -Wl,-wrap,access
 tests_LDADD = $(LDADD_GTEST) $(LDADD_SAI) -lnl-genl-3 -lhiredis -lhiredis -lpthread \
         -lswsscommon -lswsscommon -lgtest -lgtest_main -lzmq -lnl-3 -lnl-route-3 -lgmock -lgmock_main -lprotobuf -ldashapi
 
