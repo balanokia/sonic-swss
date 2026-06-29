@@ -161,6 +161,7 @@ AC_CONFIG_FILES([
     fdbsyncd/Makefile
     natsyncd/Makefile
     portsyncd/Makefile
+    vrrpsyncd/Makefile
     teamsyncd/Makefile
     tlm_teamd/Makefile
     mclagsyncd/Makefile
