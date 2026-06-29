@@ -29,6 +29,12 @@
 using namespace std;
 using namespace swss;
 
+static std::string getIpOnly(const std::string &ip_prefix)
+{
+    auto pos = ip_prefix.find('/');
+    return pos == std::string::npos ? ip_prefix : ip_prefix.substr(0, pos);
+}
+
 
 VrrpSync::VrrpSync(RedisPipeline *pipelineAppDB, DBConnector* cfgDb) :
     m_vrrpTable(pipelineAppDB, APP_VRRP_TABLE_NAME),
@@ -357,8 +363,9 @@ void VrrpSync::VrrpUpdateNbr(string &ifname, int afi, string &vip, string &op)
     string cmd, res;
     int ret;
     string afi_str = (afi == AF_INET6)? "-6": "";
+    string vip_addr = getIpOnly(vip);
 
-    cmd = "ip " + afi_str + " neigh flush " + vip + " dev " + ifname;
+    cmd = "ip " + afi_str + " neigh flush " + vip_addr + " dev " + ifname;
 
     ret = swss::exec(cmd, res);
     if (ret)
@@ -382,6 +389,7 @@ void VrrpSync::VrrpDbUpdate(string &macVlanIf, int ifindex, string &ifname, int 
     string key;
     string len;
     std::vector<FieldValueTuple> vec;
+    string vip_addr = getIpOnly(vip);
 
     if (afi == AF_INET6)
     {
@@ -400,7 +408,7 @@ void VrrpSync::VrrpDbUpdate(string &macVlanIf, int ifindex, string &ifname, int 
 
     key += ifname;
     key += "|";
-    key += vip; 
+    key += vip_addr;
     key += len;
 
 
