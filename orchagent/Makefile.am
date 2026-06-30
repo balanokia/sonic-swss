@@ -97,6 +97,7 @@ orchagent_SOURCES = \
             crmorch.cpp \
             request_parser.cpp \
             vrforch.cpp \
+            vrrporch.cpp \
             countercheckorch.cpp \
             vxlanorch.cpp \
             tunneltermhelper.cpp \
@@ -120,6 +121,7 @@ orchagent_SOURCES = \
             srv6orch.cpp \
             response_publisher.cpp \
             nvgreorch.cpp \
+            vrrporch.cpp \
             zmqorch.cpp \
             dash/dashenifwdorch.cpp \
             dash/dashenifwdinfo.cpp \
