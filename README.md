@@ -19,6 +19,11 @@
 ## Description
 The SWitch State Service (SWSS) is a collection of software that provides a database interface for communication with and state representation of network applications and network switch hardware.
 
+## Local Integration History
+
+- 2026-07-03: For branch `vrrp_pr1446_pr3106_pr3313_pr3315-single-commit_v2`, resolved `orchagent` startup abort caused by duplicate `VrrpOrch` registration in `orchagent/orchdaemon.cpp` (`Type P8VrrpOrch already registered`).
+- 2026-07-03: Consolidated the branch tip to keep VRRP integration changes and the duplicate-registration fix as a single commit for easier review and replay.
+
 ## Getting Started
 
 ### Prerequisites
