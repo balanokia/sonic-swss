@@ -2494,35 +2494,6 @@ bool PortsOrch::setPortFec(Port &port, sai_port_fec_mode_t fec_mode, bool overri
 
     if (m_gearboxEnabled && (m_portList[port.m_alias].m_init == true) && (m_gearboxInterfaceMap.find(port.m_index) != m_gearboxInterfaceMap.end()))
     {
-        map<sai_port_serdes_attr_t, SerdesValue> serdes_attr;
-        generateSerdesTxFirAttrMap(tx_fir_strings_system_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
-        if (serdes_attr.size() != 0)
-        {
-             status = setPortSerdesAttribute(port.m_system_side_id, port.m_switch_id, serdes_attr);
-             if (status)
-             {
-                 SWSS_LOG_NOTICE("Set port %s system side preemphasis is success", port.m_alias.c_str());
-             }
-             else
-             {
-                 return false;
-             }
-         }
-         serdes_attr.clear();
-         generateSerdesTxFirAttrMap(tx_fir_strings_line_side, m_gearboxInterfaceMap[port.m_index].tx_firs, serdes_attr);
-         if (serdes_attr.size() != 0)
-         {
-             status = setPortSerdesAttribute(port.m_line_side_id, port.m_switch_id, serdes_attr);
-             if (status)
-             {
-                 SWSS_LOG_NOTICE("Set port %s line side preemphasis is success", port.m_alias.c_str());
-             }
-             else
-             {
-                 return false;
-             }
-         }
-
          // Trigger PHY sys/line link training
 
          status = setGearboxPortAttr(port, PHY_PORT_TYPE, SAI_PORT_ATTR_LINK_TRAINING_ENABLE, static_cast<void*>(&m_gearboxPortMap[port.m_index].system_training), override_fec);
