@@ -64,17 +64,139 @@ bool VrrpMgr::setIntfArpAccept(const std::string &intf_alias, const bool arp_acc
     return true;
 }
 
+std::string VrrpMgr::makeVrrpListKey(const std::string &intf_alias, const std::string &vrid) const
+{
+    return intf_alias + "|" + vrid;
+}
+
+char VrrpMgr::classifyParentType(const std::string &intf_alias) const
+{
+    if (intf_alias.find('.') != std::string::npos)
+    {
+        return 's';
+    }
+    if (!intf_alias.compare(0, strlen(VLAN_PREFIX), VLAN_PREFIX))
+    {
+        return 'v';
+    }
+    if (!intf_alias.compare(0, strlen(LAG_PREFIX), LAG_PREFIX))
+    {
+        return 'p';
+    }
+    if (!intf_alias.compare(0, strlen(SUBINTF_LAG_PREFIX), SUBINTF_LAG_PREFIX))
+    {
+        return 's';
+    }
+    return 'e';
+}
+
+bool VrrpMgr::acquireParentToken(const std::string &intf_alias, char &parent_type, unsigned int &token)
+{
+    auto token_it = m_parentTokenMap.find(intf_alias);
+    if (token_it != m_parentTokenMap.end())
+    {
+        token_it->second.ref_count++;
+        parent_type = token_it->second.parent_type;
+        token = token_it->second.token;
+        return true;
+    }
+
+    parent_type = classifyParentType(intf_alias);
+    auto &allocator = m_typeAllocators[parent_type];
+
+    if (!allocator.free_tokens.empty())
+    {
+        auto free_it = allocator.free_tokens.begin();
+        token = free_it->first;
+        allocator.free_tokens.erase(free_it);
+    }
+    else
+    {
+        if (allocator.next_token > 0xffff)
+        {
+            SWSS_LOG_ERROR("No free vrrp token for parent type[%c] on interface[%s]", parent_type, intf_alias.c_str());
+            return false;
+        }
+        token = allocator.next_token++;
+    }
+
+    if (allocator.used_tokens.find(token) != allocator.used_tokens.end())
+    {
+        SWSS_LOG_ERROR("vrrp token allocator corruption for type[%c], token[%u]", parent_type, token);
+        return false;
+    }
+
+    allocator.used_tokens[token] = true;
+    m_parentTokenMap[intf_alias] = VrrpParentTokenInfo{parent_type, token, 1};
+    return true;
+}
+
+bool VrrpMgr::releaseParentToken(const std::string &intf_alias)
+{
+    auto token_it = m_parentTokenMap.find(intf_alias);
+    if (token_it == m_parentTokenMap.end())
+    {
+        return true;
+    }
+
+    auto &info = token_it->second;
+    if (info.ref_count > 1)
+    {
+        info.ref_count--;
+        return true;
+    }
+
+    auto allocator_it = m_typeAllocators.find(info.parent_type);
+    if (allocator_it == m_typeAllocators.end())
+    {
+        SWSS_LOG_ERROR("Missing allocator for parent type[%c]", info.parent_type);
+        return false;
+    }
+    auto &allocator = allocator_it->second;
+    if (allocator.used_tokens.find(info.token) == allocator.used_tokens.end())
+    {
+        SWSS_LOG_ERROR("vrrp token release mismatch type[%c], token[%u]", info.parent_type, info.token);
+        return false;
+    }
+
+    allocator.used_tokens.erase(info.token);
+    allocator.free_tokens[info.token] = true;
+    m_parentTokenMap.erase(token_it);
+    return true;
+}
+
+std::string VrrpMgr::buildTokenizedVrrpName(const std::string &vrid, bool is_ipv4, char parent_type, unsigned int token) const
+{
+    std::stringstream token_stream;
+    token_stream << std::hex << token;
+    std::string token_hex = token_stream.str();
+    while (token_hex.size() < 4)
+    {
+        token_hex = "0" + token_hex;
+    }
+    if (token_hex.size() > 4)
+    {
+        token_hex = token_hex.substr(token_hex.size() - 4);
+    }
+
+    return join(vrrp_name_delimiter,
+                (is_ipv4 ? VRRP_V4_PREFIX : VRRP_V6_PREFIX),
+                vrid,
+                std::string(1, parent_type) + token_hex);
+}
+
 bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid, const bool is_ipv4, 
     const std::set<IpPrefix> &vip_list, const std::string &admin_status)
 {
+    auto list_key = makeVrrpListKey(intf_alias, vrid);
     VrrpIntfConf vrrp_conf;
-    if (m_vrrpList.find(vrid) == m_vrrpList.end())
+    if (m_vrrpList.find(list_key) == m_vrrpList.end())
     {
         vrrp_conf.alias = intf_alias;
     }
     else
     {
-        vrrp_conf = m_vrrpList[vrid];
+        vrrp_conf = m_vrrpList[list_key];
     }
     auto &vrrp = is_ipv4 ? vrrp_conf.vrrp4 : vrrp_conf.vrrp6;
     auto &vrrp_entry = is_ipv4 ? vrrp_conf.vrrp4_entry : vrrp_conf.vrrp6_entry;
@@ -89,19 +211,29 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
         if (!vrrp.isValid())
         {
             MacAddress vmac;
+            unsigned int parent_token = 0;
+            char parent_type = 'e';
             if (!parseVrrpMac(vrid, is_ipv4, vmac))
             {
                 return false;
             }
-            vrrp = VrrpIntf(intf_alias, vrid, is_ipv4, vmac.to_string());
+            if (!acquireParentToken(intf_alias, parent_type, parent_token))
+            {
+                return false;
+            }
+
+            auto vrrp_name = buildTokenizedVrrpName(vrid, is_ipv4, parent_type, parent_token);
+            vrrp = VrrpIntf(intf_alias, vrrp_name);
             if (!vrrp.isValid())
             {
                 SWSS_LOG_WARN("parse new vrrp intf fail, intf: %s, vrid: %s, is ipv4:%d", intf_alias.c_str(), vrid.c_str(), is_ipv4);
+                releaseParentToken(intf_alias);
                 return false;
             }
             if (!addVirtualInterface(intf_alias, vrrp.getVrrpName(), vmac, is_ipv4))
             {
                 vrrp = VrrpIntf();
+                releaseParentToken(intf_alias);
                 return false;
             }
         }
@@ -115,6 +247,7 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
             {
                 return false;
             }
+            releaseParentToken(intf_alias);
             vrrp = VrrpIntf();
             vrrp_entry = VrrpIntfEntry();
         }
@@ -145,17 +278,17 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
         if (vaild_vips.find(diff_ip) != vaild_vips.end())
         {
             // add vip
-            addVirtualInterfaceIp(vrid, diff_ip);
+            addVirtualInterfaceIp(vrrp.getVrrpName(), diff_ip);
         }
 
         if (original_vips.find(diff_ip) != original_vips.end())
         {
             // del vip
-            delVirtualInterfaceIp(vrid, diff_ip);
+            delVirtualInterfaceIp(vrrp.getVrrpName(), diff_ip);
         }
     }
 
-    m_vrrpList[vrid] = vrrp_conf;
+    m_vrrpList[list_key] = vrrp_conf;
     // set parent intf
     if (!isVrrpOnIntf(intf_alias))
     {
@@ -178,7 +311,8 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
 
 bool VrrpMgr::removeVrrpIntf(const std::string &intf_alias, const std::string &vrid, const bool is_ipv4)
 {
-    auto it = m_vrrpList.find(vrid);
+    auto list_key = makeVrrpListKey(intf_alias, vrid);
+    auto it = m_vrrpList.find(list_key);
     if (it == m_vrrpList.end())
     {
         SWSS_LOG_INFO("Not found vrid: %s", vrid.c_str());
@@ -192,6 +326,7 @@ bool VrrpMgr::removeVrrpIntf(const std::string &intf_alias, const std::string &v
         delVirtualInterface(intf_alias, vrrp.getVrrpName());
         vrrp = VrrpIntf();
         vrrp_entry = VrrpIntfEntry();
+        releaseParentToken(intf_alias);
     }
 
     if (!it->second.vrrp4.isValid() && !it->second.vrrp6.isValid())
@@ -257,13 +392,12 @@ bool VrrpMgr::delVirtualInterface(const std::string &intf_alias, const std::stri
     return true;
 }
 
-bool swss::VrrpMgr::addVirtualInterfaceIp(const std::string &vrid, const IpPrefix &ip_addr)
+bool swss::VrrpMgr::addVirtualInterfaceIp(const std::string &vrrp_name, const IpPrefix &ip_addr)
 {
     stringstream cmd;
     string res;
 
     bool ip_ipv4 = ip_addr.isV4();
-    string vrrp_name = join(vrrp_name_delimiter, (ip_ipv4 ? VRRP_V4_PREFIX : VRRP_V6_PREFIX), vrid);
     string ipPrefixStr = ip_addr.to_string();
     // link add ip dev vrrp
     cmd << IP_CMD << (ip_ipv4 ? "" : " -6 ") << " address add " << shellquote(ipPrefixStr) << " dev " << shellquote(vrrp_name);
@@ -282,13 +416,12 @@ bool swss::VrrpMgr::addVirtualInterfaceIp(const std::string &vrid, const IpPrefi
     return true;
 }
 
-bool swss::VrrpMgr::delVirtualInterfaceIp(const std::string &vrid, const IpPrefix &ip_addr)
+bool swss::VrrpMgr::delVirtualInterfaceIp(const std::string &vrrp_name, const IpPrefix &ip_addr)
 {
     stringstream cmd;
     string res;
 
     bool ip_ipv4 = ip_addr.isV4();
-    string vrrp_name = join(vrrp_name_delimiter, (ip_ipv4 ? VRRP_V4_PREFIX : VRRP_V6_PREFIX), vrid);
     string ipPrefixStr = ip_addr.to_string();
     // link del ip dev vrrp
     cmd << IP_CMD << (ip_ipv4 ? "" : " -6 ") << " address del " << shellquote(ipPrefixStr) << " dev " << shellquote(vrrp_name);
@@ -469,14 +602,6 @@ void VrrpMgr::doTask(Consumer &consumer)
         {
             SWSS_LOG_INFO("Port %s is not ready, pending...", intf_alias.c_str());
             it++;
-            continue;
-        }
-
-        if (m_vrrpList.find(vrrp_id) != m_vrrpList.end() && m_vrrpList[vrrp_id].alias != intf_alias)
-        {
-            SWSS_LOG_WARN("vrid[%s] has been created on interface[%s], ignore it: %s",
-                          vrrp_id.c_str(), m_vrrpList[vrrp_id].alias.c_str(), kfvKey(t).c_str());
-            it = consumer.m_toSync.erase(it);
             continue;
         }
 

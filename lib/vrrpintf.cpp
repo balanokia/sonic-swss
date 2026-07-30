@@ -56,7 +56,7 @@ VrrpIntf::VrrpIntf(const std::string &parentName, const std::string &vrrpName) :
     vrrp_vmac = "";
 
     auto name_list = tokenize(vrrpName, vrrp_name_delimiter);
-    if (name_list.size() == 2)
+    if (name_list.size() >= 2)
     {
         std::string vrrp_name_prefix = name_list[0];
         std::string vridStr = name_list[1];

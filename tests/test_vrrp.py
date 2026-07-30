@@ -157,8 +157,10 @@ class TestVrrp(object):
         self.addremove_vrrp6_instance_vip("Ethernet8", 8, "fc00::8/126")
 
         # check kernel macvlan device info
-        output = dvs.runcmd(['sh', '-c', "ip address show Vrrp6-8"])
-        assert "fc00::8/126" not in output or "00:00:5e:00:02:08" not in output
+        output = dvs.runcmd(['sh', '-c', "ip -d link show type macvlan | grep -E 'Vrrp6-8-.*@Ethernet8'"])
+        assert "@Ethernet8" in output
+        output = dvs.runcmd(['sh', '-c', "ip -6 address show dev $(ip -d link show type macvlan | awk '/Vrrp6-8-.*@Ethernet8/ {print $2}' | tr -d ':')"])
+        assert "fc00::8/126" in output
 
         # remove vrrp6 instance
         self.remove_vrrp6_instance("Ethernet8", 8)
@@ -195,8 +197,10 @@ class TestVrrp(object):
         self.addremove_vrrp_instance_vip("Ethernet8", 8, "8.8.8.1/24")
 
         # check kernel macvlan device info
-        output = dvs.runcmd(['sh', '-c', "ip address show Vrrp4-8"])
-        assert "8.8.8.1/24" not in output or "00:00:5e:00:01:08" not in output
+        output = dvs.runcmd(['sh', '-c', "ip -d link show type macvlan | grep -E 'Vrrp4-8-.*@Ethernet8'"])
+        assert "@Ethernet8" in output
+        output = dvs.runcmd(['sh', '-c', "ip -4 address show dev $(ip -d link show type macvlan | awk '/Vrrp4-8-.*@Ethernet8/ {print $2}' | tr -d ':')"])
+        assert "8.8.8.1/24" in output
 
         # remove vrrp instance
         self.remove_vrrp_instance("Ethernet8", 8)
@@ -207,3 +211,62 @@ class TestVrrp(object):
         # remove interface
         self.remove_l3_intf("Ethernet8")
 
+    def test_VrrpSameVidDifferentInterfaces(self, dvs, testlog):
+        self.setup_db(dvs)
+
+        self.create_l3_intf("Ethernet8", "")
+        self.create_l3_intf("Ethernet12", "")
+
+        self.set_admin_status(dvs, "Ethernet8", "up")
+        self.set_admin_status(dvs, "Ethernet12", "up")
+
+        self.add_ip_address("Ethernet8", "8.8.8.8/24")
+        self.add_ip_address("Ethernet12", "12.12.12.12/24")
+        time.sleep(2)
+
+        self.addremove_vrrp_instance_vip("Ethernet8", 8, "8.8.8.1/24")
+        self.addremove_vrrp_instance_vip("Ethernet12", 8, "12.12.12.1/24")
+        time.sleep(2)
+
+        output = dvs.runcmd(['sh', '-c', "ip -d link show type macvlan | grep -E 'Vrrp4-8-.*@(Ethernet8|Ethernet12)'"])
+        assert "@Ethernet8" in output
+        assert "@Ethernet12" in output
+
+        self.remove_vrrp_instance("Ethernet8", 8)
+        self.remove_vrrp_instance("Ethernet12", 8)
+
+        self.remove_ip_address("Ethernet8", "8.8.8.8/24")
+        self.remove_ip_address("Ethernet12", "12.12.12.12/24")
+
+        self.remove_l3_intf("Ethernet8")
+        self.remove_l3_intf("Ethernet12")
+
+    def test_Vrrp6SameVidDifferentInterfaces(self, dvs, testlog):
+        self.setup_db(dvs)
+
+        self.create_l3_intf("Ethernet8", "")
+        self.create_l3_intf("Ethernet12", "")
+
+        self.set_admin_status(dvs, "Ethernet8", "up")
+        self.set_admin_status(dvs, "Ethernet12", "up")
+
+        self.add_ip_address("Ethernet8", "fc00::8/64")
+        self.add_ip_address("Ethernet12", "fc00::12/64")
+        time.sleep(2)
+
+        self.addremove_vrrp6_instance_vip("Ethernet8", 29, "fc00::88/64")
+        self.addremove_vrrp6_instance_vip("Ethernet12", 29, "fc00::99/64")
+        time.sleep(2)
+
+        output = dvs.runcmd(['sh', '-c', "ip -d link show type macvlan | grep -E 'Vrrp6-29-.*@(Ethernet8|Ethernet12)'"])
+        assert "@Ethernet8" in output
+        assert "@Ethernet12" in output
+
+        self.remove_vrrp6_instance("Ethernet8", 29)
+        self.remove_vrrp6_instance("Ethernet12", 29)
+
+        self.remove_ip_address("Ethernet8", "fc00::8/64")
+        self.remove_ip_address("Ethernet12", "fc00::12/64")
+
+        self.remove_l3_intf("Ethernet8")
+        self.remove_l3_intf("Ethernet12")
