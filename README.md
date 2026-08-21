@@ -113,6 +113,15 @@ You can increase it by executing this command: `ulimit -n 8192`. Feel free to ch
 
 **Note:** This change is only valid for the current terminal session. If you want a persistent change, append `ulimit -n 8192` to `~/.bashrc`.
 
+#### `EXEC_WITH_ERROR_THROW` fails with string literal commands
+
+If you see a compile error similar to `invalid operands of types 'const char[...]' and 'const char[...]' to binary 'operator+'`, the command argument passed to `EXEC_WITH_ERROR_THROW` is likely a string literal. The macro appends error text with `cmd + " : " + res`, so use a `std::string` variable for the command:
+
+```
+const std::string cmd = "cat /proc/sys/net/ipv4/conf/all/arp_ignore";
+EXEC_WITH_ERROR_THROW(cmd, res);
+```
+
 ## Need Help?
 
 For general questions, setup help, or troubleshooting:
