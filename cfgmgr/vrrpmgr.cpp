@@ -28,7 +28,8 @@ VrrpMgr::VrrpMgr(DBConnector *cfgDb, DBConnector *appDb, DBConnector *stateDb, c
         m_appPortTable(appDb, APP_PORT_TABLE_NAME),
         m_stateLagTable(stateDb, STATE_LAG_TABLE_NAME),
         m_stateVlanTable(stateDb, STATE_VLAN_TABLE_NAME),
-        m_statePortTable(stateDb, STATE_PORT_TABLE_NAME)
+        m_statePortTable(stateDb, STATE_PORT_TABLE_NAME),
+        m_savedAllArpIgnore(-1)
 {
 }
 
@@ -61,6 +62,126 @@ bool VrrpMgr::setIntfArpAccept(const std::string &intf_alias, const bool arp_acc
     }
 
     SWSS_LOG_INFO("Set vrrp arp %s on interface[%s]", arp_accept ? "accept" : "default", intf_alias.c_str());
+    return true;
+}
+
+bool VrrpMgr::restoreSonicDefaultAllArpIgnore()
+{
+    /*
+     * restore SONiC default all.arp_ignore=2 (90-sonic.conf) to re-enable strict ARP reply policy
+     */
+    if (!m_hostRouteArpMacvlans.empty())
+    {
+        return true;
+    }
+
+    stringstream cmd;
+    string res;
+    cmd << ECHO_CMD << " " << SONIC_DEFAULT_ARP_IGNORE
+        << " > /proc/sys/net/ipv4/conf/all/arp_ignore";
+    try
+    {
+        EXEC_WITH_ERROR_THROW(cmd.str(), res);
+        SWSS_LOG_NOTICE("Restored all.arp_ignore=%d (SONiC default) after VRRP macvlan cleanup",
+                        SONIC_DEFAULT_ARP_IGNORE);
+    }
+    catch (const std::exception &e)
+    {
+        SWSS_LOG_ERROR("Failed to restore all.arp_ignore=%d: %s", SONIC_DEFAULT_ARP_IGNORE, e.what());
+        return false;
+    }
+    m_savedAllArpIgnore = -1;
+    return true;
+}
+
+bool VrrpMgr::setVrrpMacvlanHostRouteArp(const std::string &vrrp_name, bool enable)
+{
+    /*
+     * SONiC sets net.ipv4.conf.all.arp_ignore=2. For a VIP programmed as
+     * a host route (/32) on the VRRP macvlan, mode 2 suppresses ARP replies
+     * (sender not on-link vs /32). Effective arp_ignore is max(all, iface), so
+     * macvlan alone cannot override all=2 — lower all to 1 while any such
+     * macvlan exists, and set iface arp_ignore=1 + arp_announce=2.
+     * On last macvlan/VRRP cleanup, restore all.arp_ignore=2 (SONiC default).
+     */
+    stringstream cmd;
+    string res;
+
+    if (enable)
+    {
+        if (m_hostRouteArpMacvlans.count(vrrp_name) != 0)
+        {
+            return true;
+        }
+
+        if (m_hostRouteArpMacvlans.empty())
+        {
+            try
+            {
+                const std::string read_arp_ignore_cmd = "cat /proc/sys/net/ipv4/conf/all/arp_ignore";
+                EXEC_WITH_ERROR_THROW(read_arp_ignore_cmd, res);
+                m_savedAllArpIgnore = std::stoi(res);
+            }
+            catch (const std::exception &e)
+            {
+                SWSS_LOG_WARN("Failed to read all.arp_ignore, assume %d: %s",
+                              SONIC_DEFAULT_ARP_IGNORE, e.what());
+                m_savedAllArpIgnore = SONIC_DEFAULT_ARP_IGNORE;
+            }
+
+            if (m_savedAllArpIgnore > 1)
+            {
+                cmd.str("");
+                cmd.clear();
+                cmd << ECHO_CMD << " 1 > /proc/sys/net/ipv4/conf/all/arp_ignore";
+                try
+                {
+                    EXEC_WITH_ERROR_THROW(cmd.str(), res);
+                }
+                catch (const std::exception &e)
+                {
+                    SWSS_LOG_ERROR("Failed to set all.arp_ignore=1 for host-route VIP: %s", e.what());
+                    m_savedAllArpIgnore = -1;
+                    return false;
+                }
+                SWSS_LOG_NOTICE("Lowered all.arp_ignore %d -> 1 for VRRP host-route VIP ARP",
+                                m_savedAllArpIgnore);
+            }
+        }
+
+        cmd.str("");
+        cmd.clear();
+        cmd << ECHO_CMD << " 1 > /proc/sys/net/ipv4/conf/" << shellquote(vrrp_name) << "/arp_ignore && ";
+        cmd << ECHO_CMD << " 2 > /proc/sys/net/ipv4/conf/" << shellquote(vrrp_name) << "/arp_announce";
+        try
+        {
+            EXEC_WITH_ERROR_THROW(cmd.str(), res);
+        }
+        catch (const std::exception &e)
+        {
+            SWSS_LOG_ERROR("Failed to set host-route ARP sysctls on %s: %s", vrrp_name.c_str(), e.what());
+            return false;
+        }
+
+        m_hostRouteArpMacvlans[vrrp_name] = true;
+        SWSS_LOG_NOTICE("Enabled host-route ARP on %s (arp_ignore=1 arp_announce=2)", vrrp_name.c_str());
+        return true;
+    }
+
+    if (m_hostRouteArpMacvlans.erase(vrrp_name) == 0)
+    {
+        if (m_hostRouteArpMacvlans.empty())
+        {
+            restoreSonicDefaultAllArpIgnore();
+        }
+        return true;
+    }
+
+    if (m_hostRouteArpMacvlans.empty())
+    {
+        restoreSonicDefaultAllArpIgnore();
+    }
+
     return true;
 }
 
@@ -201,6 +322,10 @@ bool VrrpMgr::removeVrrpIntf(const std::string &intf_alias, const std::string &v
         {
             SWSS_LOG_INFO("No vrrp on intf[%s], arp accept back to default", intf_alias.c_str());
             setIntfArpAccept(intf_alias, false);
+            if (m_hostRouteArpMacvlans.empty())
+            {
+                restoreSonicDefaultAllArpIgnore();
+            }
         }
     }
 
@@ -239,6 +364,9 @@ bool VrrpMgr::delVirtualInterface(const std::string &intf_alias, const std::stri
 {
     stringstream cmd;
     string res;
+
+    /* Clear host-route ARP bookkeeping before link delete */
+    setVrrpMacvlanHostRouteArp(vrrp_name, false);
 
     // link del vrrp
     cmd << IP_CMD << " link del " << shellquote(vrrp_name);
@@ -279,6 +407,13 @@ bool swss::VrrpMgr::addVirtualInterfaceIp(const std::string &vrid, const IpPrefi
     }
 
     SWSS_LOG_INFO("Add ip[%s] on vitrual intf[%s]", ipPrefixStr.c_str(), vrrp_name.c_str());
+
+    /* Plain VIP / IpPrefix default => /32 host route on macvlan; enable ARP replies */
+    if (ip_ipv4 && ip_addr.getMaskLength() == 32)
+    {
+        setVrrpMacvlanHostRouteArp(vrrp_name, true);
+    }
+
     return true;
 }
 
@@ -304,6 +439,7 @@ bool swss::VrrpMgr::delVirtualInterfaceIp(const std::string &vrid, const IpPrefi
     }
 
     SWSS_LOG_INFO("Del ip[%s] on vitrual intf[%s]", ipPrefixStr.c_str(), vrrp_name.c_str());
+    /* Host-route ARP sysctls cleared in delVirtualInterface when macvlan is removed */
     return true;
 }
 

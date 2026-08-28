@@ -47,9 +47,15 @@ private:
     /* <vid, VrrpIntfConf> */ 
     std::map<std::string, VrrpIntfConf> m_vrrpList;
 
+    std::map<std::string, bool> m_hostRouteArpMacvlans;
+    int m_savedAllArpIgnore;
+    static const int SONIC_DEFAULT_ARP_IGNORE = 2;
+
     void doTask(Consumer &consumer);
     
     bool setIntfArpAccept(const std::string &intf_alias, const bool arp_accept = true);
+    bool setVrrpMacvlanHostRouteArp(const std::string &vrrp_name, bool enable);
+    bool restoreSonicDefaultAllArpIgnore();
 
     bool setVrrpIntf(const std::string &intf_alias, const std::string &vrid, const bool is_ipv4, 
         const std::set<IpPrefix> &vip_list, const std::string &admin_status);
