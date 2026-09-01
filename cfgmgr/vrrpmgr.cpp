@@ -608,10 +608,10 @@ void VrrpMgr::doTask(Consumer &consumer)
             continue;
         }
 
-        if (m_vrrpList.find(vrrp_id) != m_vrrpList.end() && m_vrrpList[vrrp_id].alias != intf_alias)
+        string intf_vrid_key = intf_alias + "|" + vrrp_id;
+        if (m_vrrpList.find(intf_vrid_key) != m_vrrpList.end() && m_vrrpList[intf_vrid_key].alias != intf_alias)
         {
-            SWSS_LOG_WARN("vrid[%s] has been created on interface[%s], ignore it: %s",
-                          vrrp_id.c_str(), m_vrrpList[vrrp_id].alias.c_str(), kfvKey(t).c_str());
+            SWSS_LOG_WARN("vrrp key[%s] is mapped to a different interface[%s], ignore: %s", intf_vrid_key.c_str(), m_vrrpList[intf_vrid_key].alias.c_str(), kfvKey(t).c_str());
             it = consumer.m_toSync.erase(it);
             continue;
         }
@@ -623,7 +623,7 @@ void VrrpMgr::doTask(Consumer &consumer)
             {
                 vrid = fvValue(i);
             }
-            else if (fvField(i) == "vip")
+            else if (fvField(i) == "vip" || fvField(i) == "vip@")
             {
                 vip_str = fvValue(i);
             }
