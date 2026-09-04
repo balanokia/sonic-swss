@@ -23,6 +23,12 @@ using namespace swss;
 #define VRRP_V4_MAC_PREFIX "00:00:5e:00:01:"
 #define VRRP_V6_MAC_PREFIX "00:00:5e:00:02:"
 
+static std::string getIpOnly(const std::string &ip_prefix)
+{
+    auto pos = ip_prefix.find('/');
+    return pos == std::string::npos ? ip_prefix : ip_prefix.substr(0, pos);
+}
+
 VrrpMgr::VrrpMgr(DBConnector *cfgDb, DBConnector *appDb, DBConnector *stateDb, const std::vector<std::string> &tableNames) : 
         Orch(cfgDb, tableNames),
         m_appPortTable(appDb, APP_PORT_TABLE_NAME),
@@ -64,8 +70,99 @@ bool VrrpMgr::setIntfArpAccept(const std::string &intf_alias, const bool arp_acc
     return true;
 }
 
-bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid, const bool is_ipv4, 
-    const std::set<IpPrefix> &vip_list, const std::string &admin_status)
+bool VrrpMgr::extractPrefixFromAddrLine(const std::string &line, bool is_ipv4, IpPrefix &prefix)
+{
+    const std::string marker = is_ipv4 ? " inet " : " inet6 ";
+    auto pos = line.find(marker);
+    if (pos == std::string::npos)
+    {
+        return false;
+    }
+
+    pos += marker.size();
+    auto end = line.find(' ', pos);
+    std::string token = (end == std::string::npos) ? line.substr(pos) : line.substr(pos, end - pos);
+    if (token.empty())
+    {
+        return false;
+    }
+
+    prefix = IpPrefix(token);
+    return true;
+}
+
+bool VrrpMgr::resolveParentPrefixLen(const std::string &intf_alias, const IpAddress &vip, int &prefix_len)
+{
+    std::stringstream cmd;
+    std::string res;
+    bool is_ipv4 = vip.isV4();
+
+    cmd << IP_CMD << (is_ipv4 ? " -o -4 " : " -o -6 ")
+        << " address show dev " << shellquote(intf_alias);
+
+    int ret = swss::exec(cmd.str(), res);
+    if (ret)
+    {
+        SWSS_LOG_WARN("Unable to get parent address inventory on [%s], cmd '%s' failed rc=%d",
+                      intf_alias.c_str(), cmd.str().c_str(), ret);
+        return false;
+    }
+
+    std::istringstream output(res);
+    std::string line;
+    int best_match = -1;
+    while (std::getline(output, line))
+    {
+        if (line.empty())
+        {
+            continue;
+        }
+
+        try
+        {
+            IpPrefix candidate;
+            if (!extractPrefixFromAddrLine(line, is_ipv4, candidate))
+            {
+                continue;
+            }
+            if (!candidate.isAddressInSubnet(vip))
+            {
+                continue;
+            }
+            int mask = candidate.getMaskLength();
+            if (mask > best_match)
+            {
+                best_match = mask;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            SWSS_LOG_DEBUG("Skip parent addr parse line [%s], reason: %s", line.c_str(), e.what());
+        }
+    }
+
+    if (best_match < 0)
+    {
+        return false;
+    }
+
+    prefix_len = best_match;
+    return true;
+}
+
+bool VrrpMgr::deriveRuntimeVipPrefix(const std::string &intf_alias, const IpAddress &vip, IpPrefix &runtime_vip)
+{
+    int plen = 0;
+    if (!resolveParentPrefixLen(intf_alias, vip, plen))
+    {
+        return false;
+    }
+    runtime_vip = IpPrefix(vip.getIp(), plen);
+    return true;
+}
+
+bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid, const bool is_ipv4,
+    const std::set<IpAddress> &vip_list, const std::string &admin_status)
 {
     VrrpIntfConf vrrp_conf;
     if (m_vrrpList.find(vrid) == m_vrrpList.end())
@@ -79,10 +176,35 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
     auto &vrrp = is_ipv4 ? vrrp_conf.vrrp4 : vrrp_conf.vrrp6;
     auto &vrrp_entry = is_ipv4 ? vrrp_conf.vrrp4_entry : vrrp_conf.vrrp6_entry;
 
-    // generate vmac
+    // generate vmac and derive runtime vip prefix from kernel installed parent address. (not from config_db)
+    std::set<IpAddress> valid_vip_hosts;
+    auto is_ipv4_check = [is_ipv4](const IpAddress &has_vip){ return has_vip.isV4() == is_ipv4; };
+    copy_if(vip_list.begin(), vip_list.end(), std::inserter(valid_vip_hosts, valid_vip_hosts.begin()), is_ipv4_check);
+
     set<IpPrefix> vaild_vips;
-    auto is_ipv4_check = [is_ipv4](const IpPrefix &has_vip){ return has_vip.isV4() == is_ipv4; };
-    copy_if(vip_list.begin(), vip_list.end(), std::inserter(vaild_vips, vaild_vips.begin()), is_ipv4_check);
+    for (const auto &vip_host : valid_vip_hosts)
+    {
+        try
+        {
+            IpPrefix runtime_prefix;
+            if (deriveRuntimeVipPrefix(intf_alias, vip_host, runtime_prefix))
+            {
+                vaild_vips.insert(runtime_prefix);
+            }
+            else
+            {
+                int fallback_mask = vip_host.isV4() ? 32 : 128;
+                SWSS_LOG_WARN("Parent prefixlen unresolved for [%s] vip [%s], fallback to host mask /%d",
+                              intf_alias.c_str(), vip_host.to_string().c_str(), fallback_mask);
+                vaild_vips.insert(IpPrefix(vip_host.getIp(), fallback_mask));
+            }
+        }
+        catch (const std::exception &e)
+        {
+            SWSS_LOG_WARN("Skip vip [%s] on [%s], runtime prefix derive failed: %s",
+                          vip_host.to_string().c_str(), intf_alias.c_str(), e.what());
+        }
+    }
     if (!vaild_vips.empty())
     {
         // add vrrp intf
@@ -265,8 +387,9 @@ bool swss::VrrpMgr::addVirtualInterfaceIp(const std::string &vrid, const IpPrefi
     bool ip_ipv4 = ip_addr.isV4();
     string vrrp_name = join(vrrp_name_delimiter, (ip_ipv4 ? VRRP_V4_PREFIX : VRRP_V6_PREFIX), vrid);
     string ipPrefixStr = ip_addr.to_string();
-    // link add ip dev vrrp
-    cmd << IP_CMD << (ip_ipv4 ? "" : " -6 ") << " address add " << shellquote(ipPrefixStr) << " dev " << shellquote(vrrp_name);
+    // Keep VIP address on VRRP child interface but suppress auto connected prefix route.
+    cmd << IP_CMD << (ip_ipv4 ? "" : " -6 ") << " address add " << shellquote(ipPrefixStr)
+        << " dev " << shellquote(vrrp_name) << " noprefixroute";
 
     try
     {
@@ -499,13 +622,17 @@ void VrrpMgr::doTask(Consumer &consumer)
         bool is_ipv4 = table == CFG_VRRP_TABLE_NAME ? true : false;
         if (op == SET_COMMAND)
         {
-            set<IpPrefix> vips;
+            set<IpAddress> vips;
             if (!vip_str.empty())
             {
                 vector<string> vip_list = tokenize(vip_str, list_item_delimiter);
                 try
                 {
-                    transform(vip_list.begin(), vip_list.end(), inserter(vips, vips.begin()), [](const string &vip){ return IpPrefix(vip); });
+                    transform(vip_list.begin(), vip_list.end(), inserter(vips, vips.begin()),
+                              [](const string &vip)
+                              {
+                                  return IpAddress(getIpOnly(vip));
+                              });
                 }
                 catch (const std::exception &e)
                 {
