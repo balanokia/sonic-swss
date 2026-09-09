@@ -62,7 +62,27 @@ bool VrrpOrch::addOperation(const Request& request)
             return true;
         }
     }
-    gPortsOrch->getPort(request.getKeyString(0), port);
+    const auto& alias = request.getKeyString(0);
+
+    if (!gPortsOrch->allPortsReady())
+    {
+        return false;
+    }
+
+    if (!gPortsOrch->getPort(alias, port))
+    {
+        SWSS_LOG_INFO("Port %s is not ready, pending VRRP %s",
+                      alias.c_str(), ip_pfx.to_string().c_str());
+        return false;
+    }
+
+    if (port.m_type == Port::VLAN &&
+        port.m_vlan_info.vlan_oid == SAI_NULL_OBJECT_ID)
+    {
+        SWSS_LOG_INFO("VLAN %s has no oid, pending VRRP", alias.c_str());
+        return false;
+    }
+
     attr.id = SAI_ROUTER_INTERFACE_ATTR_TYPE;
     switch(port.m_type)
     {
@@ -78,7 +98,7 @@ bool VrrpOrch::addOperation(const Request& request)
             break;
         default:
             SWSS_LOG_ERROR("Unsupported port type: %d", port.m_type);
-            break;
+            return true;
     }
     vmac_attrs.push_back(attr);
     switch(port.m_type)
@@ -104,7 +124,7 @@ bool VrrpOrch::addOperation(const Request& request)
             break;
         default:
             SWSS_LOG_ERROR("Unsupported port type: %d", port.m_type);
-            break;
+            return true;
     }
     port_oid = attr.value.oid;
     vmac_attrs.push_back(attr);
@@ -197,35 +217,38 @@ bool VrrpOrch::delOperation(const Request& request)
         SWSS_LOG_ERROR("VRRP entry for port %s, vip %s doesn't exist", request.getKeyString(0).c_str(),request.getKeyIpPrefix(1).to_string().c_str());
         return true;
     }
-    gPortsOrch->getPort(request.getKeyString(0), port);
+    bool port_found = gPortsOrch->getPort(request.getKeyString(0), port);
     auto ip_pfx = request.getKeyIpPrefix(1);
     sai_route_entry_t unicast_route_entry;
     unicast_route_entry.switch_id = gSwitchId;
     unicast_route_entry.vr_id = port.m_vr_id;
     copy(unicast_route_entry.destination, ip_pfx.getIp());
-    switch(port.m_type)
+    if (port_found)
     {
-        case Port::PHY:
-            port_oid = port.m_port_id;
-            break;
-        case Port::LAG:
-            port_oid = port.m_lag_id;
-            break;
-        case Port::VLAN:
-            port_oid = port.m_vlan_info.vlan_oid;
-            break;
-        case Port::SUBPORT:
-            port_oid = port.m_parent_port_id;
-            break;
-        default:
-            SWSS_LOG_ERROR("Unsupported port type: %d", port.m_type);
-            break;
+        switch(port.m_type)
+        {
+            case Port::PHY:
+                port_oid = port.m_port_id;
+                break;
+            case Port::LAG:
+                port_oid = port.m_lag_id;
+                break;
+            case Port::VLAN:
+                port_oid = port.m_vlan_info.vlan_oid;
+                break;
+            case Port::SUBPORT:
+                port_oid = port.m_parent_port_id;
+                break;
+            default:
+                SWSS_LOG_ERROR("Unsupported port type: %d", port.m_type);
+                break;
+        }
+        //Flush the FDB entry for vmac
+        FdbEntry entry;
+        entry.mac = vrrp_table_[key].vmac;
+        entry.bv_id = port_oid;
+        gFdbOrch->removeFdbEntry(entry, FDB_ORIGIN_LEARN);
     }
-    //Flush the FDB entry for vmac
-    FdbEntry entry;
-    entry.mac = vrrp_table_[key].vmac;
-    entry.bv_id = port_oid;
-    gFdbOrch->removeFdbEntry(entry, FDB_ORIGIN_LEARN);
     //If same vip is configured as DIP on the port, then skip delete vip as it will delete the DIP on the port.
     if (!hasSameIpAddr (request.getKeyString(0), request.getKeyIpPrefix(1)))
     {
