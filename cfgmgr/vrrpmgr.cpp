@@ -226,26 +226,8 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
                 vrrp = VrrpIntf();
                 return false;
             }
+            m_vrrpList[vrid] = vrrp_conf;
         }
-    }
-    else
-    {
-        // del vrrp intf
-        if (vrrp.isValid())
-        {
-            if (!delVirtualInterface(intf_alias, vrrp.getVrrpName()))
-            {
-                return false;
-            }
-            vrrp = VrrpIntf();
-            vrrp_entry = VrrpIntfEntry();
-        }
-    }
-
-    if (!vrrp.isValid())
-    {
-        SWSS_LOG_WARN("set vrrp fail");
-        return false;
     }
 
     // set admin status
@@ -260,24 +242,38 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
     set<IpPrefix> diff_vips;
     set_symmetric_difference(original_vips.begin(), original_vips.end(), vaild_vips.begin(), vaild_vips.end(), std::inserter(diff_vips, diff_vips.begin()));
     SWSS_LOG_INFO("original_ip size:%d, apply_vips size:%d, diff size:%d", (int)original_vips.size(), (int)vaild_vips.size(), (int)diff_vips.size());
-    vrrp_entry.vips = vaild_vips;
 
+    bool ip_ok = true;
     for (const IpPrefix &diff_ip : diff_vips)
     {
         if (vaild_vips.find(diff_ip) != vaild_vips.end())
         {
-            // add vip
-            addVirtualInterfaceIp(vrid, diff_ip);
+            if (!addVirtualInterfaceIp(vrid, diff_ip))
+            {
+                ip_ok = false;
+                continue;
+            }
+            vrrp_entry.vips.insert(diff_ip);
         }
 
         if (original_vips.find(diff_ip) != original_vips.end())
         {
-            // del vip
-            delVirtualInterfaceIp(vrid, diff_ip);
+            if (!delVirtualInterfaceIp(vrid, diff_ip))
+            {
+                ip_ok = false;
+                continue;
+            }
+            vrrp_entry.vips.erase(diff_ip);
         }
     }
 
     m_vrrpList[vrid] = vrrp_conf;
+    if (!ip_ok)
+    {
+        SWSS_LOG_WARN("Set vrrp vip on intf[%s] vrid[%s] incomplete, retry", intf_alias.c_str(), vrid.c_str());
+        return false;
+    }
+
     // set parent intf
     if (!isVrrpOnIntf(intf_alias))
     {
@@ -286,12 +282,15 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
     }
     // set vrrp vrf
     auto parent_link = LinkCache::getInstance().getLinkByName(intf_alias.c_str());
-    int vrf_id = rtnl_link_get_master(parent_link);
-    if (vrf_id != 0)
+    if (vrrp.isValid() && parent_link)
     {
-        auto vrf_name = LinkCache::getInstance().ifindexToName(vrf_id);
-        setVirtualInterfaceVrf(vrrp.getVrrpName(), vrf_name);
-        SWSS_LOG_INFO("Set vrrp on intf[%s] vrid[%s] Vrf: %s", intf_alias.c_str(), vrid.c_str(), vrf_name.c_str());
+        int vrf_id = rtnl_link_get_master(parent_link);
+        if (vrf_id != 0)
+        {
+            auto vrf_name = LinkCache::getInstance().ifindexToName(vrf_id);
+            setVirtualInterfaceVrf(vrrp.getVrrpName(), vrf_name);
+            SWSS_LOG_INFO("Set vrrp on intf[%s] vrid[%s] Vrf: %s", intf_alias.c_str(), vrid.c_str(), vrf_name.c_str());
+        }
     }
 
     SWSS_LOG_NOTICE("Set vrrp on intf[%s] vrid[%s] is_ipv4 %d", intf_alias.c_str(), vrid.c_str(), is_ipv4);
@@ -628,11 +627,14 @@ void VrrpMgr::doTask(Consumer &consumer)
                 vector<string> vip_list = tokenize(vip_str, list_item_delimiter);
                 try
                 {
-                    transform(vip_list.begin(), vip_list.end(), inserter(vips, vips.begin()),
-                              [](const string &vip)
-                              {
-                                  return IpAddress(getIpOnly(vip));
-                              });
+                    for (const auto &vip : vip_list)
+                    {
+                        if (vip.empty())
+                        {
+                            continue;
+                        }
+                        vips.insert(IpAddress(getIpOnly(vip)));
+                    }
                 }
                 catch (const std::exception &e)
                 {
@@ -658,14 +660,18 @@ void VrrpMgr::doTask(Consumer &consumer)
 
             if (!setVrrpIntf(intf_alias, vrrp_id, is_ipv4, vips, admin_status))
             {
-                SWSS_LOG_WARN("Set vrrp on intf[%s] vrid[%s] failed.", intf_alias.c_str(), vrrp_id.c_str());
+                SWSS_LOG_WARN("Set vrrp on intf[%s] vrid[%s] failed, retry.", intf_alias.c_str(), vrrp_id.c_str());
+                it++;
+                continue;
             }
         }
         else if (op == DEL_COMMAND)
         {
             if (!removeVrrpIntf(intf_alias, vrrp_id, is_ipv4))
             {
-                SWSS_LOG_WARN("Del vrrp on intf[%s] vrid[%s] failed.", intf_alias.c_str(), vrrp_id.c_str());
+                SWSS_LOG_WARN("Del vrrp on intf[%s] vrid[%s] failed, retry.", intf_alias.c_str(), vrrp_id.c_str());
+                it++;
+                continue;
             }
         }
 
