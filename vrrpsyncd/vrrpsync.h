@@ -20,7 +20,7 @@ public:
     VrrpSync(RedisPipeline *pipelineAppDB, DBConnector* cfgDb);
     ~VrrpSync();
 
-    void VrrpLinkProcess(int ifindex, std::string &ifname, std::string &parent_ifname, int afi, std::string vmac, unsigned int if_flags, bool is_del);
+    void VrrpLinkProcess(int ifindex, std::string &ifname, std::string &parent_ifname, int afi, std::string vmac, unsigned int if_flags, bool is_del, bool proto_down);
     void VrrpAddrUp(int ifindex, std::string &ifname, int afi, std::string &vip);
     void VrrpAddrDown(int ifindex, std::string &ifname, int afi, std::string &vip);
     void VrrpDbUpdate(std::string &macVlanIf, int key, std::string &ifname, int afi, std::string &vip, std::string &vmac, bool del);	

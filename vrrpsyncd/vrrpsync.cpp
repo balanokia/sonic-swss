@@ -35,6 +35,25 @@ static std::string getIpOnly(const std::string &ip_prefix)
     return pos == std::string::npos ? ip_prefix : ip_prefix.substr(0, pos);
 }
 
+static inline bool vrrpReadProtoDownSysfs(VrrpSync *sync, const char *ifname)
+{
+    bool exists = false;
+    std::string path = "/sys/class/net/" + std::string(ifname) + "/proto_down";
+    std::string value = sync->ReadLineFromFile(path, &exists);
+    if (!exists || value.empty())
+    {
+        SWSS_LOG_DEBUG("protodown-read sysfs-path active if=%s exists=%d value_empty=%d",
+                       ifname, (int)exists, value.empty() ? 1 : 0);
+        return false;
+    }
+
+    value.erase(std::remove(value.begin(), value.end(), '\n'), value.end());
+    bool proto_down = (value == "1");
+    SWSS_LOG_DEBUG("protodown-read sysfs-path active if=%s exists=%d raw=%s value=%d",
+                   ifname, (int)exists, value.c_str(), (int)proto_down);
+    return proto_down;
+}
+
 
 VrrpSync::VrrpSync(RedisPipeline *pipelineAppDB, DBConnector* cfgDb) :
     m_vrrpTable(pipelineAppDB, APP_VRRP_TABLE_NAME),
@@ -158,7 +177,7 @@ void VrrpSync::VrrpUpdateNetdevFlags(string &ifname, int afi)
     WriteToFile(path, sysctlValue);
 }
 
-void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifname, int afi, string vmac, unsigned int if_state, bool is_del)
+void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifname, int afi, string vmac, unsigned int if_state, bool is_del, bool proto_down)
 {
     int key;
     std::unordered_map<int, vrrpmacip>::iterator it_if;
@@ -177,9 +196,11 @@ void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifnam
     m_vrrpinfo[key].vmac = vmac;
 
 
-    up = ((m_vrrpinfo[key].if_state & IFF_UP) && 
-          (m_vrrpinfo[key].if_state & IFF_RUNNING) && 
-          (m_vrrpinfo[key].if_state & IFF_LOWER_UP))? true: false;
+    bool up_from_flags = ((m_vrrpinfo[key].if_state & IFF_UP) &&
+          (m_vrrpinfo[key].if_state & IFF_RUNNING) &&
+          (m_vrrpinfo[key].if_state & IFF_LOWER_UP)) ? true : false;
+
+    up = (!is_del) && up_from_flags && (!proto_down);
     
     VrrpUpdateNetdevFlags(parent_ifname, afi);
 
@@ -479,19 +500,20 @@ void VrrpSync::onMsg(int nlmsg_type, struct nl_object *obj)
             parent_ifname = VrrpIfindexToName(l_link);            
             
             if_flags = rtnl_link_get_flags(link);
+            bool proto_down = vrrpReadProtoDownSysfs(this, ifname);
             
             nl_addr2str(rtnl_link_get_addr(link), macstr, MAX_ADDR_SIZE);
 
             std::string if_name(ifname);
             std::string mac_val(macstr);            
 
-            VrrpLinkProcess(ifindex, if_name, parent_ifname, afi, mac_val, if_flags, false);
+            VrrpLinkProcess(ifindex, if_name, parent_ifname, afi, mac_val, if_flags, false, proto_down);
             m_netLinkOnMsgLinkNewUse++;
             m_netLinkOnMsgUse++;
 
-            SWSS_LOG_NOTICE("RTM_NEWLINK[%u/%u] ifname: %s, if_flags = %d, mac = %s, l_link = %d", 
+            SWSS_LOG_NOTICE("RTM_NEWLINK[%u/%u] ifname: %s, if_flags = %d, proto_down=%d, mac = %s, l_link = %d",
                             m_netLinkOnMsgLinkNew, m_netLinkOnMsgLinkNewUse,
-                            ifname ? ifname: nil, if_flags, macstr, l_link);
+                            ifname ? ifname: nil, if_flags, (int)proto_down, macstr, l_link);
             
             break;
         }
@@ -526,7 +548,7 @@ void VrrpSync::onMsg(int nlmsg_type, struct nl_object *obj)
             std::string if_name(ifname);
             std::string mac_val(macstr);   
 
-            VrrpLinkProcess(ifindex, if_name, parent_ifname, afi, mac_val, if_flags, true);           
+            VrrpLinkProcess(ifindex, if_name, parent_ifname, afi, mac_val, if_flags, true, true);
             m_netLinkOnMsgLinkDelUse++;
             m_netLinkOnMsgUse++;
 
