@@ -1,6 +1,7 @@
 #ifndef VRRPORCH_H
 #define VRRPORCH_H
 
+#include <map>
 #include <string>
 #include <sstream>
 #include "orch.h"
@@ -54,12 +55,21 @@ struct vrrp_key_hash
 
 typedef std::unordered_map<vrrp_key_t, vrrp_data_t, vrrp_key_hash> VrrpTable;
 
+struct vrrp_group_t
+{
+    sai_object_id_t rifid = SAI_NULL_OBJECT_ID;
+    uint32_t vip_count = 0;
+};
+
+typedef std::pair<std::string, MacAddress> vrrp_group_key_t;
+typedef std::map<vrrp_group_key_t, vrrp_group_t> VrrpGroupTable;
+
 const request_description_t request_desc = {
     { REQ_T_STRING, REQ_T_IP_PREFIX },
     {
         { "vmac", REQ_T_MAC_ADDRESS },
     },
-    { } // no mandatory attributes
+    { "vmac" }
 };
 
 class VrrpRequest : public Request
@@ -76,8 +86,8 @@ public:
 private:
     virtual bool addOperation(const Request& request);
     virtual bool delOperation(const Request& request);
-    bool hasSameIpAddr(const string &alias,const IpPrefix &vip_prefix);
     VrrpTable vrrp_table_;
+    VrrpGroupTable vrrp_group_table_;
     VrrpRequest request_;
 };
 

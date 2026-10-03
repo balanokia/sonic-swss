@@ -4,7 +4,7 @@
 #include "request_parser.h"
 #include "portsorch.h"
 #include "port.h"
-#include "swssnet.h"
+#include "saihelper.h"
 #include "fdborch.h"
 #include "intfsorch.h"
 #include "vrrporch.h"
@@ -12,28 +12,17 @@
 extern sai_router_interface_api_t*  sai_router_intfs_api;
 extern PortsOrch *gPortsOrch;
 extern sai_object_id_t gSwitchId;
-extern sai_route_api_t* sai_route_api;
 extern FdbOrch *gFdbOrch;
 extern IntfsOrch *gIntfsOrch;
-bool VrrpOrch::hasSameIpAddr(const string &alias,const IpPrefix &vip_prefix)
-{
-    IntfsTable m_syncdIntfses = gIntfsOrch->getSyncdIntfses();
-    for (const auto &intfPrefix: m_syncdIntfses[alias].ip_addresses)
-    {
-        if (intfPrefix.getIp() == vip_prefix.getIp())
-        {
-                SWSS_LOG_NOTICE("vrrp hasSameIpAddr configured %s vip %s",alias.c_str(),vip_prefix.to_string().c_str());
-                return true;
-        }
-    }
-    return false;
-}
+/*
+ * VIP is a kernel local address + noprefixroute and reached
+ * through the parent subnet route, so no ASIC route programmed for it.
+ */
 bool VrrpOrch::addOperation(const Request& request)
 {
     SWSS_LOG_ENTER();
     sai_attribute_t attr;
     vector<sai_attribute_t> vmac_attrs;
-    vector<sai_attribute_t> vip_attrs;
     Port port;
     MacAddress mac;
     sai_object_id_t vrrp_rif_id;
@@ -61,6 +50,10 @@ bool VrrpOrch::addOperation(const Request& request)
                 ip_pfx.to_string().c_str(),request.getKeyString(0).c_str());
             return true;
         }
+        SWSS_LOG_INFO("vip %s on port %s belongs to vmac %s, pending vmac %s until it is removed",
+                ip_pfx.to_string().c_str(),request.getKeyString(0).c_str(),
+                vrrp_table_[key].vmac.to_string().c_str(),mac.to_string().c_str());
+        return false;
     }
     const auto& alias = request.getKeyString(0);
 
@@ -72,6 +65,13 @@ bool VrrpOrch::addOperation(const Request& request)
     if (!gPortsOrch->getPort(alias, port))
     {
         SWSS_LOG_INFO("Port %s is not ready, pending VRRP %s",
+                      alias.c_str(), ip_pfx.to_string().c_str());
+        return false;
+    }
+
+    if (port.m_rif_id == SAI_NULL_OBJECT_ID)
+    {
+        SWSS_LOG_INFO("Port %s has no router interface, pending VRRP %s",
                       alias.c_str(), ip_pfx.to_string().c_str());
         return false;
     }
@@ -129,11 +129,6 @@ bool VrrpOrch::addOperation(const Request& request)
     port_oid = attr.value.oid;
     vmac_attrs.push_back(attr);
     SWSS_LOG_NOTICE("vrrp orch add : port %s, ip %s, vmac %s",request.getKeyString(0).c_str(),ip_pfx.to_string().c_str(),mac.to_string().c_str());
-    sai_route_entry_t unicast_route_entry;
-    unicast_route_entry.switch_id = gSwitchId;
-    unicast_route_entry.vr_id = port.m_vr_id;
-    copy(unicast_route_entry.destination, ip_pfx.getIp());
-    subnet(unicast_route_entry.destination, unicast_route_entry.destination);
     attr.id = SAI_ROUTER_INTERFACE_ATTR_VIRTUAL_ROUTER_ID;
     if (port.m_vr_id != SAI_NULL_OBJECT_ID)
     {
@@ -141,64 +136,33 @@ bool VrrpOrch::addOperation(const Request& request)
     }
     else
     {
-        /* Legacy fallback for older behavior when interface VR is unavailable */
         attr.value.oid = gVirtualRouterId;
     }
     vmac_attrs.push_back(attr);
     attr.id = SAI_ROUTER_INTERFACE_ATTR_IS_VIRTUAL;
     attr.value.booldata =  true;
     vmac_attrs.push_back(attr);
-    //program VRRPMAC.
-    SWSS_LOG_INFO("vrrp orch add, before create_router_interface : port name %s, 0x%" PRIx64 " &rif_id %p",request.getKeyString(0).c_str(),vrrp_rif_id,&vrrp_rif_id);
-    sai_status_t vmac_status = sai_router_intfs_api->create_router_interface(&vrrp_rif_id, gSwitchId, (uint32_t)vmac_attrs.size(), vmac_attrs.data());
-    SWSS_LOG_NOTICE("vrrp orch add, after create_router_interface : port name %s, rif_id 0x%" PRIx64, request.getKeyString(0).c_str(),vrrp_rif_id);
-    if (vmac_status != SAI_STATUS_SUCCESS)
+    //program VRRPMAC when first vip of the vrrp group configured and its master.
+    auto& group = vrrp_group_table_[vrrp_group_key_t(alias, mac)];
+    if (group.rifid == SAI_NULL_OBJECT_ID)
     {
-        SWSS_LOG_ERROR("Failed to program Vrrp Mac on interface %s, rv:%d",
-                 port.m_alias.c_str(), vmac_status);
-        throw runtime_error("Failed to program Vrrp Mac on interface.");
-    }
-    //program VIP
-    if (!hasSameIpAddr (request.getKeyString(0),request.getKeyIpPrefix(1)))
-    {
-        attr.id = SAI_ROUTE_ENTRY_ATTR_PACKET_ACTION;
-        attr.value.s32 = SAI_PACKET_ACTION_FORWARD;
-        vip_attrs.push_back(attr);
-        attr.id = SAI_ROUTE_ENTRY_ATTR_NEXT_HOP_ID;
-        attr.value.oid = vrrp_rif_id;
-        vip_attrs.push_back(attr);
-        //API to program VRRP ipaddress
-        sai_status_t vip_status = sai_route_api->create_route_entry(&unicast_route_entry, (uint32_t)vip_attrs.size(), vip_attrs.data());
-        if (vip_status != SAI_STATUS_SUCCESS)
+        sai_status_t vmac_status = sai_router_intfs_api->create_router_interface(&vrrp_rif_id, gSwitchId, (uint32_t)vmac_attrs.size(), vmac_attrs.data());
+        SWSS_LOG_NOTICE("vrrp orch add, after create_router_interface : port name %s, rif_id 0x%" PRIx64, request.getKeyString(0).c_str(),vrrp_rif_id);
+        if (vmac_status != SAI_STATUS_SUCCESS)
         {
-            sai_status_t rif_status = sai_router_intfs_api->remove_router_interface (vrrp_rif_id);
-            if (rif_status != SAI_STATUS_SUCCESS)
-            {
-                SWSS_LOG_ERROR("Failed to delete rif 0x%" PRIx64 " added for Vrrp Mac on interface %s, rv:%d",
-                        vrrp_rif_id, port.m_alias.c_str(), rif_status);
-            }
-            SWSS_LOG_ERROR("Failed to program Vrrp IP on interface %s, rv:%d",
-                      port.m_alias.c_str(), vip_status);
-            throw runtime_error("Failed to program Vrrp Ip on interface.");
+            SWSS_LOG_ERROR("Failed to program Vrrp Mac on interface %s, rv:%d",
+                     port.m_alias.c_str(), vmac_status);
+            task_process_status handle_status = handleSaiCreateStatus(SAI_API_ROUTER_INTERFACE, vmac_status);
+            return parseHandleSaiStatusFailure(handle_status);
         }
+        group.rifid = vrrp_rif_id;
+        gIntfsOrch->increaseRouterIntfsRefCount(alias);
     }
-    key = vrrp_key_t(request.getKeyString(0),request.getKeyIpPrefix(1));
-    it = vrrp_table_.find(key);
-    if (it == vrrp_table_.end())
-    {
-        vrrp_table_[key] = {request.getAttrMacAddress("vmac"),vrrp_rif_id};
-        SWSS_LOG_NOTICE("_vrrp_table add port %s, ip %s, vmac %s, rif_id 0x%" PRIx64, request.getKeyString(0).c_str(),
-                                ip_pfx.to_string().c_str(),mac.to_string().c_str(),vrrp_rif_id);
-    }
-    else
-    {
-        SWSS_LOG_NOTICE("_vrrp_table entry already exists with vmac %s, rif_id 0x%" PRIx64 " update vmac to %s, rifid to 0x%" PRIx64,
-                vrrp_table_[key].vmac.to_string().c_str(),vrrp_table_[key].rifid,
-                request.getAttrMacAddress("vmac").to_string().c_str(),vrrp_rif_id);
-        vrrp_table_.erase(key);
-        vrrp_table_[key] = {request.getAttrMacAddress("vmac"),vrrp_rif_id};
-    }
-    //Flush the FDB entry for vmac on vrrp master
+    vrrp_rif_id = group.rifid;
+    group.vip_count++;
+    vrrp_table_[key] = {mac, vrrp_rif_id};
+    SWSS_LOG_NOTICE("_vrrp_table add port %s, ip %s, vmac %s, rif_id 0x%" PRIx64 ", vips %u", request.getKeyString(0).c_str(),
+                            ip_pfx.to_string().c_str(),mac.to_string().c_str(),vrrp_rif_id,group.vip_count);
     FdbEntry entry;
     entry.mac = request.getAttrMacAddress("vmac");
     entry.bv_id = port_oid;
@@ -219,10 +183,6 @@ bool VrrpOrch::delOperation(const Request& request)
     }
     bool port_found = gPortsOrch->getPort(request.getKeyString(0), port);
     auto ip_pfx = request.getKeyIpPrefix(1);
-    sai_route_entry_t unicast_route_entry;
-    unicast_route_entry.switch_id = gSwitchId;
-    unicast_route_entry.vr_id = port.m_vr_id;
-    copy(unicast_route_entry.destination, ip_pfx.getIp());
     if (port_found)
     {
         switch(port.m_type)
@@ -243,33 +203,38 @@ bool VrrpOrch::delOperation(const Request& request)
                 SWSS_LOG_ERROR("Unsupported port type: %d", port.m_type);
                 break;
         }
-        //Flush the FDB entry for vmac
         FdbEntry entry;
         entry.mac = vrrp_table_[key].vmac;
         entry.bv_id = port_oid;
         gFdbOrch->removeFdbEntry(entry, FDB_ORIGIN_LEARN);
     }
-    //If same vip is configured as DIP on the port, then skip delete vip as it will delete the DIP on the port.
-    if (!hasSameIpAddr (request.getKeyString(0), request.getKeyIpPrefix(1)))
-    {
-        sai_status_t vip_status = sai_route_api->remove_route_entry(&unicast_route_entry);
-        if (vip_status != SAI_STATUS_SUCCESS)
-        {
-            SWSS_LOG_ERROR("Failed to delete Vrrp Vip on interface %s, rv:%d",
-                port.m_alias.c_str(), vip_status);
-            throw runtime_error("Failed to remove Vrrp Vip on interface");
-        }
-    }
 
-    sai_status_t vmac_status = sai_router_intfs_api->remove_router_interface (vrrp_table_[key].rifid);
-    if (vmac_status != SAI_STATUS_SUCCESS)
+    //Remove VRRPMAC when last vip of the vrrp group removed
+    auto& group = vrrp_group_table_[vrrp_group_key_t(request.getKeyString(0), vrrp_table_[key].vmac)];
+    if (group.vip_count == 1)
     {
-        SWSS_LOG_ERROR("Failed to delete Vrrp Mac on interface %s, rv:%d",
-                 port.m_alias.c_str(), vmac_status);
-        throw runtime_error("Failed to remove Vrrp Mac on interface.");
+        sai_status_t vmac_status = sai_router_intfs_api->remove_router_interface (group.rifid);
+        if (vmac_status == SAI_STATUS_ITEM_NOT_FOUND)
+        {
+            SWSS_LOG_WARN("Vrrp Mac rif 0x%" PRIx64 " on interface %s not found",
+                     group.rifid, request.getKeyString(0).c_str());
+        }
+        else if (vmac_status != SAI_STATUS_SUCCESS)
+        {
+            SWSS_LOG_ERROR("Failed to delete Vrrp Mac on interface %s, rv:%d",
+                     request.getKeyString(0).c_str(), vmac_status);
+            task_process_status handle_status = handleSaiRemoveStatus(SAI_API_ROUTER_INTERFACE, vmac_status);
+            return parseHandleSaiStatusFailure(handle_status);
+        }
+        gIntfsOrch->decreaseRouterIntfsRefCount(request.getKeyString(0));
+        group.rifid = SAI_NULL_OBJECT_ID;
     }
-    SWSS_LOG_NOTICE("vrrp orch del success,port %s vip %s vmac %s rifid 0x%" PRIx64, request.getKeyString(0).c_str(),
-        ip_pfx.to_string().c_str(),vrrp_table_[key].vmac.to_string().c_str(),vrrp_table_[key].rifid);
+    if (group.vip_count > 0)
+    {
+        group.vip_count--;
+    }
+    SWSS_LOG_NOTICE("vrrp orch del success,port %s vip %s vmac %s rifid 0x%" PRIx64 ", vips %u", request.getKeyString(0).c_str(),
+        ip_pfx.to_string().c_str(),vrrp_table_[key].vmac.to_string().c_str(),vrrp_table_[key].rifid,group.vip_count);
     vrrp_table_.erase(key);
     return true;
 }
