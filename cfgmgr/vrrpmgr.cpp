@@ -267,6 +267,19 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const std::string &vrid
         }
     }
 
+    // Delete family macvlan after all VIPs removed. Failed DB SET to be retried.
+    if (ip_ok && vrrp.isValid() && vrrp_entry.vips.empty())
+    {
+        if (!delVirtualInterface(intf_alias, vrrp.getVrrpName()))
+        {
+            ip_ok = false;
+        }
+        else
+        {
+            vrrp = VrrpIntf();
+        }
+    }
+
     m_vrrpList[vrid] = vrrp_conf;
     if (!ip_ok)
     {
