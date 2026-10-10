@@ -25,6 +25,8 @@ class VrrpIntf
         VrrpIntf(const std::string &parentName, const int vrid, const bool isIpv4);
         VrrpIntf(const std::string &parentName, const std::string &vridStr, const bool isIpv4);
         VrrpIntf(const std::string &parentName, const std::string &vridStr, const bool isIpv4, const std::string &vmacStr);
+        VrrpIntf(const std::string &parentName, const std::string &vrrpName, const std::string &vridStr,
+                 const bool isIpv4, const std::string &vmacStr);
         VrrpIntf(const std::string &parentName, const std::string &vridStr, const std::string &ipType);
         VrrpIntf(const std::string &parentName, const std::string &vrrpName);
 

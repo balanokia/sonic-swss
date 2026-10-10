@@ -209,11 +209,23 @@ bool VrrpOrch::delOperation(const Request& request)
         gFdbOrch->removeFdbEntry(entry, FDB_ORIGIN_LEARN);
     }
 
-    //Remove VRRPMAC when last vip of the vrrp group removed
-    auto& group = vrrp_group_table_[vrrp_group_key_t(request.getKeyString(0), vrrp_table_[key].vmac)];
+    const auto group_key = vrrp_group_key_t(request.getKeyString(0), vrrp_table_[key].vmac);
+    auto group_it = vrrp_group_table_.find(group_key);
+    if (group_it == vrrp_group_table_.end() || group_it->second.vip_count == 0)
+    {
+        SWSS_LOG_ERROR("VRRP group ownership missing for port %s, vip %s, vmac %s",
+                       request.getKeyString(0).c_str(), ip_pfx.to_string().c_str(),
+                       vrrp_table_[key].vmac.to_string().c_str());
+        return false;
+    }
+
+    auto& group = group_it->second;
+    const MacAddress vmac = vrrp_table_[key].vmac;
+
+    // Remove the virtual RIF before the final accepted VIP reaches zero.
     if (group.vip_count == 1)
     {
-        sai_status_t vmac_status = sai_router_intfs_api->remove_router_interface (group.rifid);
+        sai_status_t vmac_status = sai_router_intfs_api->remove_router_interface(group.rifid);
         if (vmac_status == SAI_STATUS_ITEM_NOT_FOUND)
         {
             SWSS_LOG_WARN("Vrrp Mac rif 0x%" PRIx64 " on interface %s not found",
@@ -227,14 +239,15 @@ bool VrrpOrch::delOperation(const Request& request)
             return parseHandleSaiStatusFailure(handle_status);
         }
         gIntfsOrch->decreaseRouterIntfsRefCount(request.getKeyString(0));
-        group.rifid = SAI_NULL_OBJECT_ID;
     }
-    if (group.vip_count > 0)
-    {
-        group.vip_count--;
-    }
+    group.vip_count--;
+
     SWSS_LOG_NOTICE("vrrp orch del success,port %s vip %s vmac %s rifid 0x%" PRIx64 ", vips %u", request.getKeyString(0).c_str(),
-        ip_pfx.to_string().c_str(),vrrp_table_[key].vmac.to_string().c_str(),vrrp_table_[key].rifid,group.vip_count);
+        ip_pfx.to_string().c_str(), vmac.to_string().c_str(), vrrp_table_[key].rifid, group.vip_count);
     vrrp_table_.erase(key);
+    if (group.vip_count == 0)
+    {
+        vrrp_group_table_.erase(group_it);
+    }
     return true;
 }

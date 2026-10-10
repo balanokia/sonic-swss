@@ -201,9 +201,9 @@ void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifnam
           (m_vrrpinfo[key].if_state & IFF_LOWER_UP)) ? true : false;
 
     up = (!is_del) && up_from_flags && (!proto_down);
-    
-    VrrpUpdateNetdevFlags(parent_ifname, afi);
+    m_vrrpinfo[key].active = up;
 
+    VrrpUpdateNetdevFlags(parent_ifname, afi);
     for(it_ip = m_vrrpinfo[key].m_vip.begin(); it_ip != m_vrrpinfo[key].m_vip.end(); ++it_ip)
     {
         vip = *it_ip;
@@ -221,10 +221,8 @@ void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifnam
 
 void VrrpSync::VrrpAddrUp(int ifindex, string &ifname, int afi, string &vip)
 {
-    //int run_cmd_with_shell = 0;
     int key;
     string redis_key;
-    bool up;    
     string cmd, res;
     //int ret;
     string afi_str = (afi == AF_INET6)? "-6": "";
@@ -233,12 +231,10 @@ void VrrpSync::VrrpAddrUp(int ifindex, string &ifname, int afi, string &vip)
 
     m_vrrpinfo[key].m_vip.insert(vip);
 
-    up = ((m_vrrpinfo[key].if_state & IFF_UP) && 
-          (m_vrrpinfo[key].if_state & IFF_RUNNING) && 
-          (m_vrrpinfo[key].if_state & IFF_LOWER_UP))? true: false;
-
-    if (!up)
+    if (!m_vrrpinfo[key].active)
+    {
         return;
+    }
 
     VrrpDbUpdate(ifname, key, m_vrrpinfo[key].parent_ifname, afi, vip, m_vrrpinfo[key].vmac, false);
 
@@ -258,8 +254,9 @@ void VrrpSync::VrrpAddrDown(int ifindex, string &ifname, int afi, string &vip)
         return;
 
     VrrpDbUpdate(ifname, key, m_vrrpinfo[key].parent_ifname, afi, vip, m_vrrpinfo[key].vmac, true);
+    VrrpUpdateVipNbr(ifname, m_vrrpinfo[key].parent_ifname, afi, vip, true);
 
-    m_vrrpinfo[key].m_vip.erase(vip);    
+    m_vrrpinfo[key].m_vip.erase(vip);
 
 }
 
@@ -286,7 +283,6 @@ bool VrrpSync::getSystemMac(string& mac)
 
 bool VrrpSync::getAutoIPv6LL(const string& ifname, string& ipv6ll)
 {
-    // std::stringstream cmd;
     std::string mac;
     int idx;
     uint8_t ll_addr[6];
@@ -524,7 +520,6 @@ void VrrpSync::onMsg(int nlmsg_type, struct nl_object *obj)
             m_netLinkOnMsgAddrAdd++;
 
             addr = (struct rtnl_addr *)obj;
-            // ifname = rtnl_addr_get_label(addr);
             ifindex = rtnl_addr_get_ifindex(addr); 
             afi = rtnl_addr_get_family(addr);
 
@@ -576,7 +571,6 @@ void VrrpSync::onMsg(int nlmsg_type, struct nl_object *obj)
         {
             m_netLinkOnMsgAddrDel++;
             addr = (struct rtnl_addr *)obj;
-            // ifname = rtnl_addr_get_label(addr);
             ifindex = rtnl_addr_get_ifindex(addr);                        
             afi = rtnl_addr_get_family(addr);
             

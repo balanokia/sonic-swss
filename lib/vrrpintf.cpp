@@ -49,6 +49,16 @@ VrrpIntf::VrrpIntf(const std::string &parentName, const std::string &vridStr, co
     }
 }
 
+VrrpIntf::VrrpIntf(const std::string &parentName, const std::string &vrrpName, const std::string &vridStr,
+                   const bool isIpv4, const std::string &vmacStr) :
+    parent_name(parentName), vrrp_name(vrrpName), vrrp_vmac(vmacStr), vrid(0), is_ipv4(isIpv4)
+{
+    if (std::all_of(vridStr.begin(), vridStr.end(), ::isdigit))
+    {
+        vrid = to_int<int>(vridStr);
+    }
+}
+
 VrrpIntf::VrrpIntf(const std::string &parentName, const std::string &vrrpName) :
     parent_name(parentName), vrrp_name(vrrpName)
 {

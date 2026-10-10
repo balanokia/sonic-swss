@@ -50,8 +50,9 @@ private:
         std::string parent_ifname;
         std::string vmac;
         std::set<std::string> m_vip;
+        bool active = false;
     };
-    
+
     std::unordered_map<int, vrrpmacip > m_vrrpinfo;
     std::string systemMac = "";
 
