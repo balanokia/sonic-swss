@@ -66,7 +66,8 @@ private:
 
     void doTask(Consumer &consumer);
 
-    bool setIntfArpAccept(const std::string &intf_alias, const bool arp_accept = true);
+    bool setParentVrrpNetdevFlags(const std::string &intf_alias, bool enable);
+    bool reconcileParentVrrpNetdevFlags(const std::string &intf_alias);
     bool extractPrefixFromAddrLine(const std::string &line, bool is_ipv4, IpPrefix &prefix);
     bool resolveParentPrefixLen(const std::string &intf_alias, const IpAddress &vip, int &prefix_len);
     bool deriveRuntimeVipPrefix(const std::string &intf_alias, const IpAddress &vip, IpPrefix &runtime_vip);

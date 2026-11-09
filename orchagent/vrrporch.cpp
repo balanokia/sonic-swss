@@ -46,7 +46,7 @@ bool VrrpOrch::addOperation(const Request& request)
     {
        if (vrrp_table_[key].vmac == request.getAttrMacAddress("vmac"))
         {
-            SWSS_LOG_ERROR("_vrrp_table entry already exists, with vmac %s, vip %s for port %s",mac.to_string().c_str(),
+            SWSS_LOG_NOTICE("_vrrp_table entry already exists, with vmac %s, vip %s for port %s",mac.to_string().c_str(),
                 ip_pfx.to_string().c_str(),request.getKeyString(0).c_str());
             return true;
         }
@@ -178,7 +178,7 @@ bool VrrpOrch::delOperation(const Request& request)
     auto it = vrrp_table_.find(key);
     if (it == vrrp_table_.end())
     {
-        SWSS_LOG_ERROR("VRRP entry for port %s, vip %s doesn't exist", request.getKeyString(0).c_str(),request.getKeyIpPrefix(1).to_string().c_str());
+        SWSS_LOG_NOTICE("VRRP entry for port %s, vip %s doesn't exist", request.getKeyString(0).c_str(),request.getKeyIpPrefix(1).to_string().c_str());
         return true;
     }
     bool port_found = gPortsOrch->getPort(request.getKeyString(0), port);

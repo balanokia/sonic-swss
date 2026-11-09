@@ -179,6 +179,23 @@ class TestVrrp(object):
             time.sleep(1)
         pytest.fail("VRRP interface {} was not removed".format(vrrp_name))
 
+    def count_syslog_after_marker(self, dvs, marker, message):
+        command = "awk '/{}/,ENDFILE {{print}}' /var/log/syslog | grep -F '{}' | wc -l".format(
+            marker, message)
+        rc, output = dvs.runcmd(['sh', '-c', command])
+        assert rc == 0
+        return int(output.strip())
+
+    def assert_parent_vrrp_netdev_flags(self, dvs, interface, expected):
+        for flag, value in (
+                ("arp_announce", expected[0]),
+                ("rp_filter", expected[1]),
+                ("accept_local", expected[2])):
+            path = "/proc/sys/net/ipv4/conf/{}/{}".format(interface, flag)
+            rc, output = dvs.runcmd(['cat', path])
+            assert rc == 0
+            assert output.strip() == str(value)
+
     def test_VrrpDeterministicNameBoundaries(self):
         assert self.base36_ifindex(1) == "000001"
         assert self.base36_ifindex(2147483647) == "zik0zj"
@@ -258,6 +275,7 @@ class TestVrrp(object):
         # check kernel macvlan device info
         vrrp_name = self.assert_vrrp_interface(
             dvs, "Vrrp4-8", "Ethernet8", "8.8.8.1/24", "00:00:5e:00:01:08")
+        self.assert_parent_vrrp_netdev_flags(dvs, "Ethernet8", (2, 2, 1))
 
         # Restart must adopt the existing parent-scoped link and its VIP.
         rc, _ = dvs.runcmd("supervisorctl restart vrrpmgrd")
@@ -271,6 +289,7 @@ class TestVrrp(object):
         # adopted child. Deleting the CONFIG_DB key afterwards is idempotent.
         self.addremove_vrrp_instance_vip("Ethernet8", 8, "")
         self.wait_vrrp_interface_absent(dvs, vrrp_name)
+        self.assert_parent_vrrp_netdev_flags(dvs, "Ethernet8", (0, 2, 0))
         self.remove_vrrp_instance("Ethernet8", 8)
 
         # remove IP from interface
@@ -278,6 +297,47 @@ class TestVrrp(object):
 
         # remove interface
         self.remove_l3_intf("Ethernet8")
+
+    def test_VrrpRepeatedLinkAndTeardownAreIdempotent(self, dvs, testlog):
+        self.setup_db(dvs)
+        interface = "Ethernet8"
+        vip = "8.8.8.1/24"
+
+        self.create_l3_intf(interface, "")
+        self.set_admin_status(dvs, interface, "up")
+        self.add_ip_address(interface, "8.8.8.8/24")
+        self.addremove_vrrp_instance_vip(interface, 18, vip)
+        vrrp_name = self.assert_vrrp_interface(
+            dvs, "Vrrp4-18", interface, vip, "00:00:5e:00:01:12")
+
+        marker = dvs.add_log_marker("/var/log/syslog")
+
+        # An unchanged link update must not replay the already-published VIP.
+        rc, _ = dvs.runcmd(['ip', 'link', 'set', 'dev', vrrp_name, 'up'])
+        assert rc == 0
+        time.sleep(1)
+
+        # Link withdrawal and the following DELADDR/DELLINK notifications must
+        # produce one logical delete.
+        self.remove_vrrp_instance(interface, 18)
+        self.wait_vrrp_interface_absent(dvs, vrrp_name)
+        time.sleep(1)
+
+        for message in (
+                "_vrrp_table entry already exists",
+                "Ignore duplicate VRRP add",
+                "/proto_down is not readable",
+                "WriteToFile: Failed to open the /proc/sys/net/",
+                "Failed to open VRRP netdev flag",
+                "Failed to write VRRP netdev flag",
+                "VRRP entry for port",
+                "Ignore delete for missing VRRP entry",
+                # AddrDown must not run neighbor cleanup on a deleting child.
+                "VrrpUpdateNbr: Command 'ip "):
+            assert self.count_syslog_after_marker(dvs, marker, message) == 0
+
+        self.remove_ip_address(interface, "8.8.8.8/24")
+        self.remove_l3_intf(interface)
 
     def test_VrrpSameVridOnTwoInterfaces(self, dvs, testlog):
         self.setup_db(dvs)
@@ -306,15 +366,18 @@ class TestVrrp(object):
             vrrp6_names.append(self.assert_vrrp_interface(
                 dvs, "Vrrp6-19", parent, vip_v6, "00:00:5e:00:02:13"))
 
+            self.assert_parent_vrrp_netdev_flags(dvs, parent, (2, 2, 1))
         assert len(set(vrrp4_names)) == len(parents)
         assert len(set(vrrp6_names)) == len(parents)
 
         # Removing one complete same-VRID tuple must leave the other parent's
         # independent v4/v6 tuple intact.
         self.remove_vrrp_instance(parents[0][0], vrid)
-        self.remove_vrrp6_instance(parents[0][0], vrid)
         self.wait_vrrp_interface_absent(dvs, vrrp4_names[0])
+        self.assert_parent_vrrp_netdev_flags(dvs, parents[0][0], (2, 2, 1))
+        self.remove_vrrp6_instance(parents[0][0], vrid)
         self.wait_vrrp_interface_absent(dvs, vrrp6_names[0])
+        self.assert_parent_vrrp_netdev_flags(dvs, parents[0][0], (0, 2, 0))
         self.assert_vrrp_interface(
             dvs, "Vrrp4-19", parents[1][0], parents[1][2],
             "00:00:5e:00:01:13")
@@ -323,7 +386,11 @@ class TestVrrp(object):
             "00:00:5e:00:02:13")
 
         self.remove_vrrp_instance(parents[1][0], vrid)
+        self.wait_vrrp_interface_absent(dvs, vrrp4_names[1])
+        self.assert_parent_vrrp_netdev_flags(dvs, parents[1][0], (2, 2, 1))
         self.remove_vrrp6_instance(parents[1][0], vrid)
+        self.wait_vrrp_interface_absent(dvs, vrrp6_names[1])
+        self.assert_parent_vrrp_netdev_flags(dvs, parents[1][0], (0, 2, 0))
         for parent, parent_v4, _, parent_v6, _ in parents:
             self.remove_ip_address(parent, parent_v4)
             self.remove_ip_address(parent, parent_v6)

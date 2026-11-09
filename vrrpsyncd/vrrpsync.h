@@ -24,15 +24,13 @@ public:
     void VrrpAddrUp(int ifindex, std::string &ifname, int afi, std::string &vip);
     void VrrpAddrDown(int ifindex, std::string &ifname, int afi, std::string &vip);
     void VrrpDbUpdate(std::string &macVlanIf, int key, std::string &ifname, int afi, std::string &vip, std::string &vmac, bool del);	
-    void VrrpUpdateNetdevFlags(std::string &ifname, int afi);
-    void VrrpUpdateVipNbr(string &macVlanIf, string &ifname, int afi, string &vip, bool del);
-    void VrrpUpdateNbr(string &ifname, int afi, string &vip, string &op);
+    void VrrpUpdateVipNbr(string &macVlanIf, string &ifname, int afi, string &vip);
+    void VrrpUpdateNbr(string &ifname, int afi, string &vip);
 
     bool getAutoIPv6LL(const std::string& ifname, std::string& lladdr);
     std::string VrrpIfindexToName(int ifindex);
     bool getSystemMac(std::string& mac);
     std::string ReadLineFromFile(const string file, bool *exists);
-    void WriteToFile(const string& file, const string& value);
 
     virtual void onMsg(int nlmsg_type, struct nl_object *obj);
 

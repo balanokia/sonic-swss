@@ -35,23 +35,31 @@ static std::string getIpOnly(const std::string &ip_prefix)
     return pos == std::string::npos ? ip_prefix : ip_prefix.substr(0, pos);
 }
 
-static inline bool vrrpReadProtoDownSysfs(VrrpSync *sync, const char *ifname)
+static inline bool vrrpReadProtoDownSysfs(
+    const char *ifname, bool &proto_down)
 {
-    bool exists = false;
     std::string path = "/sys/class/net/" + std::string(ifname) + "/proto_down";
-    std::string value = sync->ReadLineFromFile(path, &exists);
-    if (!exists || value.empty())
+    std::ifstream fp(path);
+    std::string value;
+
+    if (!fp.is_open() || !std::getline(fp, value))
     {
-        SWSS_LOG_DEBUG("protodown-read sysfs-path active if=%s exists=%d value_empty=%d",
-                       ifname, (int)exists, value.empty() ? 1 : 0);
+        SWSS_LOG_DEBUG("Drop RTM_NEWLINK for disappearing interface %s: "
+                       "unable to read %s", ifname, path.c_str());
         return false;
     }
 
-    value.erase(std::remove(value.begin(), value.end(), '\n'), value.end());
-    bool proto_down = (value == "1");
-    SWSS_LOG_DEBUG("protodown-read sysfs-path active if=%s exists=%d raw=%s value=%d",
-                   ifname, (int)exists, value.c_str(), (int)proto_down);
-    return proto_down;
+    if (value != "0" && value != "1")
+    {
+        SWSS_LOG_ERROR("Invalid protodown value '%s' for interface %s",
+                       value.c_str(), ifname);
+        return false;
+    }
+
+    proto_down = value == "1";
+    SWSS_LOG_DEBUG("protodown-read if=%s value=%d",
+                   ifname, (int)proto_down);
+    return true;
 }
 
 
@@ -117,25 +125,6 @@ string VrrpSync::VrrpIfindexToName(int ifindex)
     return string(ifname);
 }
 
-void VrrpSync::WriteToFile(const string& file, const string& value)
-{
-    FILE *pFile;
-
-    pFile = fopen(file.c_str(), "w");
-
-    if (pFile != NULL)
-    {
-        fputs(value.c_str(), pFile);
-        fclose(pFile);
-        SWSS_LOG_DEBUG("Updated the %s file with %s", file.c_str(), value.c_str());
-    }
-    else
-    {
-        SWSS_LOG_ERROR("Failed to open the %s file", file.c_str());
-    }
-
-}
-
 string VrrpSync::ReadLineFromFile(const string file, bool *exists)
 {
     ifstream fp(file);
@@ -158,25 +147,6 @@ string VrrpSync::ReadLineFromFile(const string file, bool *exists)
 }
 
 
-void VrrpSync::VrrpUpdateNetdevFlags(string &ifname, int afi)
-{
-    string path;
-    string sysctlValue;
-    string afi_str = (afi == AF_INET6)? "ipv6": "ipv4";
-
-    path = "/proc/sys/net/" + afi_str + "/conf/" + ifname + "/rp_filter";
-    sysctlValue = "2";
-    WriteToFile(path, sysctlValue);
-
-    path = "/proc/sys/net/" + afi_str + "/conf/" + ifname + "/arp_announce";
-    sysctlValue = "2";
-    WriteToFile(path, sysctlValue);
-
-    path = "/proc/sys/net/" + afi_str + "/conf/" + ifname + "/accept_local";
-    sysctlValue = "1";
-    WriteToFile(path, sysctlValue);
-}
-
 void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifname, int afi, string vmac, unsigned int if_state, bool is_del, bool proto_down)
 {
     int key;
@@ -185,11 +155,13 @@ void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifnam
     std::string vip;
     vrrpmacip local;    
     bool up;
+    bool was_active;
     int vip_afi;
     size_t  found;
 
     key = ifindex;
 
+    was_active = m_vrrpinfo[key].active;
     m_vrrpinfo[key].if_state = if_state;
     m_vrrpinfo[key].ifname = ifname;
     m_vrrpinfo[key].parent_ifname = parent_ifname;
@@ -203,7 +175,9 @@ void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifnam
     up = (!is_del) && up_from_flags && (!proto_down);
     m_vrrpinfo[key].active = up;
 
-    VrrpUpdateNetdevFlags(parent_ifname, afi);
+    if (was_active == up)
+        return;
+
     for(it_ip = m_vrrpinfo[key].m_vip.begin(); it_ip != m_vrrpinfo[key].m_vip.end(); ++it_ip)
     {
         vip = *it_ip;
@@ -213,7 +187,7 @@ void VrrpSync::VrrpLinkProcess(int ifindex, string &ifname, string &parent_ifnam
         else
             vip_afi = AF_INET6;
 
-        VrrpDbUpdate(ifname, key, m_vrrpinfo[key].parent_ifname, vip_afi, vip, m_vrrpinfo[key].vmac, up? false: true);
+        VrrpDbUpdate(ifname, key, m_vrrpinfo[key].parent_ifname, vip_afi, vip, m_vrrpinfo[key].vmac, !up);
     }
 
 }
@@ -229,16 +203,13 @@ void VrrpSync::VrrpAddrUp(int ifindex, string &ifname, int afi, string &vip)
     
     key = ifindex;
 
-    m_vrrpinfo[key].m_vip.insert(vip);
+    bool inserted = m_vrrpinfo[key].m_vip.insert(vip).second;
 
-    if (!m_vrrpinfo[key].active)
-    {
+    if (!inserted || !m_vrrpinfo[key].active)
         return;
-    }
 
     VrrpDbUpdate(ifname, key, m_vrrpinfo[key].parent_ifname, afi, vip, m_vrrpinfo[key].vmac, false);
-
-    VrrpUpdateVipNbr(ifname, m_vrrpinfo[key].parent_ifname, afi, vip, true);
+    VrrpUpdateVipNbr(ifname, m_vrrpinfo[key].parent_ifname, afi, vip);
     
 }
 
@@ -250,14 +221,18 @@ void VrrpSync::VrrpAddrDown(int ifindex, string &ifname, int afi, string &vip)
 
     key = ifindex;
 
-    if (m_vrrpinfo[key].m_vip.find(vip) == m_vrrpinfo[key].m_vip.end())
+    auto state_it = m_vrrpinfo.find(key);
+    if (state_it == m_vrrpinfo.end())
         return;
 
-    VrrpDbUpdate(ifname, key, m_vrrpinfo[key].parent_ifname, afi, vip, m_vrrpinfo[key].vmac, true);
-    VrrpUpdateVipNbr(ifname, m_vrrpinfo[key].parent_ifname, afi, vip, true);
+    auto &state = state_it->second;
+    auto vip_it = state.m_vip.find(vip);
+    if (vip_it == state.m_vip.end())
+        return;
 
-    m_vrrpinfo[key].m_vip.erase(vip);
-
+    if (state.active)
+        VrrpDbUpdate(ifname, key, state.parent_ifname, afi, vip, state.vmac, true);
+    state.m_vip.erase(vip_it);
 }
 
 bool VrrpSync::getSystemMac(string& mac)
@@ -341,7 +316,7 @@ bool VrrpSync::getAutoIPv6LL(const string& ifname, string& ipv6ll)
     return true;
 }
 
-void VrrpSync::VrrpUpdateNbr(string &ifname, int afi, string &vip, string &op)
+void VrrpSync::VrrpUpdateNbr(string &ifname, int afi, string &vip)
 {
     string cmd, res;
     int ret;
@@ -358,12 +333,10 @@ void VrrpSync::VrrpUpdateNbr(string &ifname, int afi, string &vip, string &op)
 }
 
 
-void VrrpSync::VrrpUpdateVipNbr(string &macVlanIf, string &ifname, int afi, string &vip, bool del)
+void VrrpSync::VrrpUpdateVipNbr(string &macVlanIf, string &ifname, int afi, string &vip)
 {
-    string op = del? "del": "replace";
-
-    VrrpUpdateNbr(ifname, afi, vip, op);
-    VrrpUpdateNbr(macVlanIf, afi, vip, op);
+    VrrpUpdateNbr(ifname, afi, vip);
+    VrrpUpdateNbr(macVlanIf, afi, vip);
 }
 
 
@@ -456,7 +429,11 @@ void VrrpSync::onMsg(int nlmsg_type, struct nl_object *obj)
             parent_ifname = VrrpIfindexToName(l_link);            
             
             if_flags = rtnl_link_get_flags(link);
-            bool proto_down = vrrpReadProtoDownSysfs(this, ifname);
+            bool proto_down = false;
+            if (!vrrpReadProtoDownSysfs(ifname, proto_down))
+            {
+                return;
+            }
             
             nl_addr2str(rtnl_link_get_addr(link), macstr, MAX_ADDR_SIZE);
 
@@ -505,6 +482,7 @@ void VrrpSync::onMsg(int nlmsg_type, struct nl_object *obj)
             std::string mac_val(macstr);   
 
             VrrpLinkProcess(ifindex, if_name, parent_ifname, afi, mac_val, if_flags, true, true);
+            m_vrrpinfo.erase(ifindex);
             m_netLinkOnMsgLinkDelUse++;
             m_netLinkOnMsgUse++;
 
@@ -592,6 +570,17 @@ void VrrpSync::onMsg(int nlmsg_type, struct nl_object *obj)
 
             if (NULL != local)
             {
+                if (afi == AF_INET6 &&
+                    IN6_IS_ADDR_LINKLOCAL(
+                        static_cast<const struct in6_addr *>(
+                            nl_addr_get_binary_addr(local))))
+                {
+                    nl_addr2str(local, addr_str, MAX_ADDR_SIZE);
+                    SWSS_LOG_NOTICE("Skip unsupported IPv6 link-local VRRP address ifname: %s, address: %s",
+                                    ifname ? ifname : nil, addr_str);
+                    break;
+                }
+
                 nl_addr2str(local, addr_str, MAX_ADDR_SIZE);
                 std::string vip_str(addr_str);                  
 

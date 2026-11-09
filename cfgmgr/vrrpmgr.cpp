@@ -10,7 +10,9 @@
 #include <swss/stringutility.h>
 #include "linkcache.h"
 
+#include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <net/if.h>
 #include <netlink/addr.h>
 #include <netlink/netlink.h>
@@ -107,36 +109,85 @@ VrrpMgr::VrrpMgr(DBConnector *cfgDb, DBConnector *appDb, DBConnector *stateDb, c
 {
 }
 
-bool VrrpMgr::setIntfArpAccept(const std::string &intf_alias, const bool arp_accept)
+bool VrrpMgr::setParentVrrpNetdevFlags(const std::string &intf_alias, const bool enable)
 {
-    stringstream cmd;
-    string res;
+    if (if_nametoindex(intf_alias.c_str()) == 0)
+    {
+        if (!enable)
+        {
+            SWSS_LOG_INFO("Parent interface[%s] is absent; VRRP netdev defaults are already converged",
+                          intf_alias.c_str());
+            return true;
+        }
 
-    if (arp_accept)
-    {
-        cmd << ECHO_CMD << " 2 > /proc/sys/net/ipv4/conf/" << shellquote(intf_alias) << "/arp_announce && ";
-        cmd << ECHO_CMD << " 2 > /proc/sys/net/ipv4/conf/" << shellquote(intf_alias) << "/rp_filter && ";
-        cmd << ECHO_CMD << " 1 > /proc/sys/net/ipv4/conf/" << shellquote(intf_alias) << "/accept_local";
-    }
-    else
-    {
-        cmd << ECHO_CMD << " 0 > /proc/sys/net/ipv4/conf/" << shellquote(intf_alias) << "/arp_announce && ";
-        cmd << ECHO_CMD << " 0 > /proc/sys/net/ipv4/conf/" << shellquote(intf_alias) << "/rp_filter && ";
-        cmd << ECHO_CMD << " 0 > /proc/sys/net/ipv4/conf/" << shellquote(intf_alias) << "/accept_local";
-    }
-
-    try
-    {
-        EXEC_WITH_ERROR_THROW(cmd.str(), res);
-    }
-    catch (const std::exception &e)
-    {
-        SWSS_LOG_ERROR("Failed to set intf arp %s on interface[%s], retry. Runtime error: %s", arp_accept ? "accept" : "default", intf_alias.c_str(), e.what());
+        SWSS_LOG_WARN("Parent interface[%s] is absent; retry VRRP netdev flag enable",
+                      intf_alias.c_str());
         return false;
     }
 
-    SWSS_LOG_INFO("Set vrrp arp %s on interface[%s]", arp_accept ? "accept" : "default", intf_alias.c_str());
+    bool parent_disappeared = false;
+    auto write_flag = [&](const char *flag, const char *value) {
+        if (parent_disappeared)
+        {
+            return true;
+        }
+
+        const std::string path = "/proc/sys/net/ipv4/conf/" + intf_alias + "/" + flag;
+        errno = 0;
+        std::ofstream output(path);
+        if (!output.is_open())
+        {
+            int open_errno = errno;
+            if (!enable && if_nametoindex(intf_alias.c_str()) == 0)
+            {
+                parent_disappeared = true;
+                SWSS_LOG_INFO("Parent interface[%s] disappeared while restoring VRRP netdev defaults",
+                              intf_alias.c_str());
+                return true;
+            }
+
+            SWSS_LOG_ERROR("Failed to open VRRP netdev flag[%s] for interface[%s]: %s",
+                           flag, intf_alias.c_str(), std::strerror(open_errno));
+            return false;
+        }
+
+        output << value;
+        output.close();
+        if (!output)
+        {
+            if (!enable && if_nametoindex(intf_alias.c_str()) == 0)
+            {
+                parent_disappeared = true;
+                SWSS_LOG_INFO("Parent interface[%s] disappeared while restoring VRRP netdev defaults",
+                              intf_alias.c_str());
+                return true;
+            }
+
+            SWSS_LOG_ERROR("Failed to write VRRP netdev flag[%s]=%s for interface[%s]",
+                           flag, value, intf_alias.c_str());
+            return false;
+        }
+        return true;
+    };
+
+    if (!write_flag("arp_announce", enable ? "2" : "0") ||
+        !write_flag("rp_filter", "2") ||
+        !write_flag("accept_local", enable ? "1" : "0"))
+    {
+        return false;
+    }
+
+    if (!parent_disappeared)
+    {
+        SWSS_LOG_INFO("Set VRRP netdev flags %s on interface[%s]",
+                      enable ? "enabled" : "default", intf_alias.c_str());
+    }
     return true;
+}
+
+bool VrrpMgr::reconcileParentVrrpNetdevFlags(const std::string &intf_alias)
+{
+    return setParentVrrpNetdevFlags(intf_alias, isVrrpOnIntf(intf_alias));
 }
 
 bool VrrpMgr::extractPrefixFromAddrLine(const std::string &line, bool is_ipv4, IpPrefix &prefix)
@@ -358,7 +409,7 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const uint8_t vrid, con
     };
     auto enforce_parent_arp = [&]() {
         persist_state();
-        return setIntfArpAccept(intf_alias, isVrrpOnIntf(intf_alias));
+        return reconcileParentVrrpNetdevFlags(intf_alias);
     };
 
     // generate vmac and derive runtime vip prefix from kernel installed parent address. (not from config_db)
@@ -456,9 +507,26 @@ bool VrrpMgr::setVrrpIntf(const std::string &intf_alias, const uint8_t vrid, con
                               intf_alias.c_str(), vrid_str.c_str(), is_ipv4);
                 return false;
             }
+
+            bool parent_flags_were_enabled = isVrrpOnIntf(intf_alias);
+            if (!parent_flags_were_enabled &&
+                !setParentVrrpNetdevFlags(intf_alias, true))
+            {
+                vrrp = VrrpIntf();
+                SWSS_LOG_WARN("Unable to enable parent VRRP netdev flags on[%s], retry",
+                              intf_alias.c_str());
+                return false;
+            }
+
             if (create_required && !addVirtualInterface(intf_alias, vrrp.getVrrpName(), vmac, is_ipv4))
             {
                 vrrp = VrrpIntf();
+                if (!parent_flags_were_enabled &&
+                    !reconcileParentVrrpNetdevFlags(intf_alias))
+                {
+                    SWSS_LOG_WARN("Unable to restore parent VRRP netdev flags on[%s] after create failure",
+                                  intf_alias.c_str());
+                }
                 return false;
             }
         }
@@ -584,7 +652,7 @@ bool VrrpMgr::removeVrrpIntf(const std::string &intf_alias, const uint8_t vrid, 
     if (it == m_vrrpList.end())
     {
         SWSS_LOG_INFO("Not found vrid: %s", vrid_str.c_str());
-        return setIntfArpAccept(intf_alias, isVrrpOnIntf(intf_alias));
+        return reconcileParentVrrpNetdevFlags(intf_alias);
     }
 
     auto &vrrp = is_ipv4 ? it->second.vrrp4 : it->second.vrrp6;
@@ -627,7 +695,7 @@ bool VrrpMgr::removeVrrpIntf(const std::string &intf_alias, const uint8_t vrid, 
         m_vrrpList.erase(it);
     }
 
-    if (!setIntfArpAccept(intf_alias, isVrrpOnIntf(intf_alias)))
+    if (!reconcileParentVrrpNetdevFlags(intf_alias))
     {
         return false;
     }
